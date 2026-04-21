@@ -31,6 +31,16 @@ python3 -m pip install -e .
 macagent-mcp
 ```
 
+If `macagent-mcp` is not found after install, add:
+```bash
+export PATH=\"$HOME/Library/Python/3.9/bin:$PATH\"
+```
+
+Or use the repo-local wrapper:
+```bash
+./scripts/macagent-mcp
+```
+
 ## Tools exposed
 
 - `macagent_ask`

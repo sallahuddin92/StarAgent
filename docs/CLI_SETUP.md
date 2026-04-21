@@ -32,6 +32,17 @@ macagent status
 macagent ask "Reply with exactly OK"
 ```
 
+If `macagent` is not found after install, add the user scripts directory to `PATH`:
+```bash
+export PATH=\"$HOME/Library/Python/3.9/bin:$PATH\"
+```
+
+Alternatively, you can always use the repo-local wrapper:
+```bash
+./scripts/macagent status
+./scripts/macagent ask \"Reply with exactly OK\"
+```
+
 Note: CLI flags like `--json` must appear before the subcommand:
 
 ```bash
