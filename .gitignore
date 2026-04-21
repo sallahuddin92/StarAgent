@@ -11,6 +11,8 @@ server.log
 # Data
 data/memory.db
 data/memory/
+data/*.db-wal
+data/*.db-shm
 
 # Sandbox writes (smoke tests default here)
 sandbox_test/
