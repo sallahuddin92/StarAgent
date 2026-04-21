@@ -221,13 +221,14 @@ async def chat_completions(
                 memory.pending_approval = None
                 store.save(memory)
             else:
-                # Completed or unknown: clear pending state.
-                if getattr(memory, "pending_approval", None) or getattr(memory, "pending_plan", None):
-                    memory.pending_approval = None
-                    memory.pending_plan = None
-                    memory.pending_history = None
-                    memory.pending_goal = None
-                    store.save(memory)
+                # Completed or unknown: always clear pending state and persist.
+                # This prevents "stuck" approvals/continuations if the agent loop cleared
+                # memory.pending_* internally before we reached this branch.
+                memory.pending_approval = None
+                memory.pending_plan = None
+                memory.pending_history = None
+                memory.pending_goal = None
+                store.save(memory)
         except Exception as e:
             logger.warning(f"Failed to persist agent continuation state: {e}")
         # Ensure we never return the internal agent fallback string as the only content.
