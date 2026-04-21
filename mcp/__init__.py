@@ -1,0 +1,2 @@
+"""MacAgent MCP server package."""
+

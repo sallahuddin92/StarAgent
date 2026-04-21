@@ -1,0 +1,2 @@
+"""MacAgent CLI package."""
+

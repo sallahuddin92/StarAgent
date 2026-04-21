@@ -68,6 +68,20 @@ def determine_execution_route(
         logger.info("Detected Open WebUI helper/meta prompt; forcing FAST_PATH (agent bypass).")
         return FAST_PATH
 
+    # 1.5) Optional explicit routing override (used by first-party CLI/MCP adapters).
+    # This is a no-op for Open WebUI (metadata is absent/empty) and preserves default behavior.
+    meta = getattr(request, "metadata", None) or {}
+    force_route = str(meta.get("force_route") or "").strip().lower()
+    if force_route in {"fast", "agent"}:
+        logger.info(f"Forced route via metadata.force_route={force_route!r}")
+        return FAST_PATH if force_route == "fast" else AGENT_PATH
+    if meta.get("force_agent") is True:
+        logger.info("Forced route via metadata.force_agent=True")
+        return AGENT_PATH
+    if meta.get("force_fast") is True:
+        logger.info("Forced route via metadata.force_fast=True")
+        return FAST_PATH
+
     # 2) If an agent run is awaiting approval or has a pending plan, route explicit resume tokens.
     if (getattr(memory, "pending_approval", None) or getattr(memory, "pending_plan", None)) and msg_lower in {
         "yes", "y", "approve", "approved", "ok", "continue", "c", "resume",

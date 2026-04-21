@@ -1,0 +1,13 @@
+[project]
+name = "macagent"
+version = "0.1.0"
+description = "MacAgent proxy + CLI + MCP server (local)"
+requires-python = ">=3.9"
+
+[project.scripts]
+macagent = "cli.macagent:main"
+macagent-mcp = "mcp.server:main"
+
+[tool.setuptools]
+packages = ["app", "cli", "client", "mcp"]
+
