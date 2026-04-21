@@ -1,0 +1,2 @@
+templates/memory_compactor_prompt.txt
+templates/system_prompt.txt

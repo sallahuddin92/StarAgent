@@ -1,0 +1,573 @@
+{
+  "recovery_snapshot": "/Users/sallahuddin/Desktop/macagent_proxy_starter/recovery/DR_20260421_174006",
+  "recovered_tree": "/Users/sallahuddin/Desktop/macagent_proxy_starter/recovery/DR_20260421_174006/recovered_tree/base",
+  "inventory_count": 87,
+  "inventory": [
+    {
+      "dest_path": ".DS_Store",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": ".env.example",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "API_REFERENCE.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "BUGFIX_SUMMARY.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "CHANGES.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "DEPLOYMENT_QUICKSTART.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "Dockerfile",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "EVIDENCE_VERIFICATION_SUMMARY.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "EVIDENCE_VERIFICATION_TESTS.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "FINAL_STATUS.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "FINAL_VERIFIED_EVIDENCE.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "IMPLEMENTATION_SUMMARY.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "LEGACY_CONVERSATION_ID_CLEANUP_PLAN.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "MEMORY_COMPACTION_VALIDATION.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "MEMORY_CONTINUITY_FIX_PLAN.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "MEMORY_CONTINUITY_ROOT_CAUSE.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "MEMORY_IDENTITY_HARDENING.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "MEMORY_RECALL_VERIFICATION.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "OPENWEBUI_COMPATIBILITY_REPORT.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "OPENWEBUI_REAL_TEST_REPORT.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "PRODUCTION_READINESS_GAP_LIST.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "PROJECT_STATUS.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "README.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "README_v2.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "RESTART_PERSISTENCE_REPORT.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "RUNTIME_TEST_RESULTS.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "SEMANTIC_RETRIEVAL_QUALITY_REPORT.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "TESTING_STRATEGY.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "THREAD_COLLISION_TEST_REPORT.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "UPGRADE_GUIDE.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "VERIFICATION_COMPLETE.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "VERIFICATION_DOCUMENTATION_INDEX.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "VERIFICATION_REPORT.md",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/__init__.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/agent.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/approval.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/database.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/executor.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/main.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/main_new.py",
+      "source_path": "/Users/sallahuddin/Library/Application Support/Code/User/History/-401b54cd/XnQ5.py",
+      "recovery_method": "copy_from_vscode_history",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/memory.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/models.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/planner.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/prompting.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/reflection.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/retrieval.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/routing.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/tokenbudget.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/tool_executor.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/tool_schemas.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/tools.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/utils.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "app/workspace_state.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "data/memory/example-project.json",
+      "source_path": "/Users/sallahuddin/Desktop/macagent_proxy_starter.zip::macagent_proxy_starter/data/memory/example-project.json",
+      "recovery_method": "extract_from_zip",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "data/memory.db",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "data/memory.db-shm",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "data/memory.db-wal",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "docker-compose.yml",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "forensic_inventory.json",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "forensic_scan.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "history_files.txt",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "proxy_persistence.log",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "recovery/disaster_recovery_20260421_173525/env.txt",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "recovery/disaster_recovery_20260421_173525/files_app.txt",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "recovery/disaster_recovery_20260421_173525/files_data.txt",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "recovery/disaster_recovery_20260421_173525/files_maxdepth3.txt",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "recovery/disaster_recovery_20260421_173525/files_scripts.txt",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "recovery/disaster_recovery_20260421_173525/files_templates.txt",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "recovery/disaster_recovery_20260421_173525/git_state.txt",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "recovery/disaster_recovery_20260421_173525/listeners.txt",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "recovery/disaster_recovery_20260421_173525/ls_root.txt",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "recovery/disaster_recovery_20260421_173525/processes.txt",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "recovery_mapping.json",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "recovery_tool.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "requirements.txt",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "scripts/run_local.sh",
+      "source_path": "/Users/sallahuddin/Desktop/macagent_proxy_starter.zip::macagent_proxy_starter/scripts/run_local.sh",
+      "recovery_method": "extract_from_zip",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "scripts/test_live_gemma4_continuation.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "server.log",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "sqlite_investigation.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "templates/memory_compactor_prompt.txt",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "templates/system_prompt.txt",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "test_app_components.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "test_fastapi_concurrent.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "test_results.json",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "test_runtime_hardening.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "test_sqlite_components.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    },
+    {
+      "dest_path": "test_v5_verification_rollback.py",
+      "source_path": null,
+      "recovery_method": "extract_from_current_repo_snapshot_tar",
+      "confidence": "exact"
+    }
+  ],
+  "missing_targets": [
+    {
+      "path": "scripts/verify_memory_continuity.py",
+      "evidence": "~/.gemini/antigravity walkthrough/implementation_plan references",
+      "candidate_source": null,
+      "status": "missing"
+    },
+    {
+      "path": "scripts/test_identity_hardening.py",
+      "evidence": "~/.gemini/antigravity walkthrough/implementation_plan references",
+      "candidate_source": null,
+      "status": "missing"
+    },
+    {
+      "path": "scripts/test_restart_persistence.py",
+      "evidence": "~/.gemini/antigravity walkthrough/implementation_plan references",
+      "candidate_source": null,
+      "status": "missing"
+    },
+    {
+      "path": "scripts/verify_final.py",
+      "evidence": "~/.gemini/antigravity walkthrough/implementation_plan references",
+      "candidate_source": null,
+      "status": "missing"
+    },
+    {
+      "path": "scripts/live_e2e_validation.py",
+      "evidence": "user-requested recovery target; no local source found in Phase 2 scan",
+      "candidate_source": null,
+      "status": "missing"
+    },
+    {
+      "path": "scripts/live_tool_validation.py",
+      "evidence": "user-requested recovery target; no local source found in Phase 2 scan",
+      "candidate_source": null,
+      "status": "missing"
+    },
+    {
+      "path": "sandbox_test/",
+      "evidence": "user-requested recovery target; no local source found in Phase 2 scan",
+      "candidate_source": null,
+      "status": "missing"
+    }
+  ]
+}

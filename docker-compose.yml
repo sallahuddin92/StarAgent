@@ -1,0 +1,63 @@
+version: '3.9'
+
+services:
+  macagent-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: macagent-proxy
+    ports:
+      - "8081:8081"
+    env_file:
+      - .env
+    environment:
+      # Production environment variables
+      DATABASE_PATH: "/app/data/memory.db"
+      MEMORY_DIR: "/app/data/memory"
+      LOG_LEVEL: "INFO"
+      USE_SEMANTIC_SEARCH: "true"
+      USE_STREAMING: "true"
+      COMPACTION_INTERVAL: "100"
+    volumes:
+      # Persistent storage for SQLite database and JSON memory
+      - ./data:/app/data
+      # Persistent storage for prompt templates
+      - ./templates:/app/templates
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    # Increase file descriptor limit for high concurrency
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+
+  # Optional: Ollama service (if running locally)
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: ollama
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama-storage:/root/.ollama
+  #   environment:
+  #     OLLAMA_HOST: "0.0.0.0:11434"
+  #   pull_policy: always
+
+# volumes:
+#   ollama-storage:

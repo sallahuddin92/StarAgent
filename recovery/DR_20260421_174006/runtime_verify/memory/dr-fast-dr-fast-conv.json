@@ -1,0 +1,18 @@
+{
+  "conversation_id": "dr-fast-conv",
+  "project_id": "dr-fast",
+  "project_summary": [
+    "What is 2 + 2?"
+  ],
+  "decisions": [],
+  "constraints": [],
+  "issues": [],
+  "style_preferences": [],
+  "archive_turns": [
+    {
+      "user": "What is 2 + 2?",
+      "assistant": "4"
+    }
+  ],
+  "turn_count": 1
+}

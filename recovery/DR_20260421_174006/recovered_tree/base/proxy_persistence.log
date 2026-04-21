@@ -1,0 +1,93 @@
+/Users/sallahuddin/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+INFO:app.database:Database initialized at ./data/memory.db with QueuePool and WAL mode
+INFO:app.database:Starting migration from ./data/memory
+INFO:app.database:Migrated Hello to SQLite
+INFO:app.database:Migrated conv-280dff891537 to SQLite
+INFO:app.database:Migrated Sequential test 1 to SQLite
+INFO:app.database:Migrated Count 1 to 3 to SQLite
+INFO:app.database:Migrated example-project to SQLite
+INFO:app.database:Migrated conv-830a5ccce236 to SQLite
+INFO:app.database:Migrated I have three cats named Fluffy, Mittens, and Shadow to SQLite
+INFO:app.database:Migrated conv-b6df1e6682d6 to SQLite
+INFO:app.database:Migrated test1 to SQLite
+INFO:app.database:Migrated Tell me about the pets to SQLite
+INFO:app.database:Migrated conv-e584d87f77dc to SQLite
+INFO:app.database:Migrated conv-1068892623ed to SQLite
+INFO:app.database:Migrated Say hello to SQLite
+INFO:app.database:Migrated conv_0 to SQLite
+INFO:app.database:Migrated I have two dogs named Rex and Buddy to SQLite
+INFO:app.database:Migrated conv-abad9a863b30 to SQLite
+INFO:app.database:Migrated conv_2 to SQLite
+INFO:app.database:Migrated conv-14a8e30d4fc5 to SQLite
+INFO:app.database:Migrated What is Project A secret? to SQLite
+INFO:app.database:Migrated Sequential test 4 to SQLite
+INFO:app.database:Migrated What is my secret? to SQLite
+INFO:app.database:Migrated Hello, say hi back to SQLite
+INFO:app.database:Migrated Hello to SQLite
+INFO:app.database:Migrated Sequential test 5 to SQLite
+INFO:app.database:Migrated Remember this: Project A secret is mango-42|Understood. Project A secret is mang to SQLite
+INFO:app.database:Migrated test2 to SQLite
+INFO:app.database:Migrated Reply with: proxy test ok to SQLite
+INFO:app.database:Migrated Remember this: Project A secret is mango-42 to SQLite
+INFO:app.database:Migrated World to SQLite
+INFO:app.database:Migrated Tell me about the pets to SQLite
+INFO:app.database:Migrated Hello to SQLite
+INFO:app.database:Migrated conv_1 to SQLite
+INFO:app.database:Migrated Sequential test 2 to SQLite
+INFO:app.database:Migrated Count 1 to 5 slowly to SQLite
+INFO:app.database:Migrated Sequential test 3 to SQLite
+INFO:app.database:Migrated conv-b481d2f4ff79 to SQLite
+INFO:app.database:Migrated conv-54fadc221f2f to SQLite
+INFO:app.database:Migrated What is my secret? to SQLite
+INFO:app.database:Migration complete: 38 conversations migrated
+INFO:app.tokenbudget:Initialized tiktoken with cl100k_base encoding
+INFO:sentence_transformers.SentenceTransformer:Use pytorch device_name: mps
+INFO:sentence_transformers.SentenceTransformer:Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+INFO:app.retrieval:Loaded sentence-transformers model: all-MiniLM-L6-v2
+INFO:app.tokenbudget:Initialized tiktoken with cl100k_base encoding
+INFO:     Started server process [19824]
+INFO:     Waiting for application startup.
+INFO:app.main:Starting MacAgent Proxy v2.0.0
+INFO:app.main:Ollama: http://127.0.0.1:11434
+INFO:app.main:Database: ./data/memory.db
+INFO:app.main:Semantic Search: True
+INFO:app.main:Streaming: True
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8081 (Press CTRL+C to quit)
+INFO:app.main:[persistence-test] Resolved conversation_id conv-14a8e30d4fc5 from fingerprint match
+INFO:app.main:[persistence-test:conv-14a8e30d4fc5] Non-streaming request
+INFO:httpx:HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 200 OK"
+INFO:app.main:[persistence-test:conv-14a8e30d4fc5] Tokens: prompt=415, completion=19 | Retrieved: 3 items
+INFO:     127.0.0.1:63173 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63340 - "GET /health HTTP/1.1" 200 OK
+INFO:app.main:[proj-concurrent] Generated new conversation_id conv-ea871adca7ab for new thread
+INFO:app.main:[proj-concurrent:conv-ea871adca7ab] Non-streaming request
+INFO:app.main:[proj-concurrent] Generated new conversation_id conv-2f929a9fb75d for new thread
+INFO:app.main:[proj-concurrent:conv-2f929a9fb75d] Non-streaming request
+INFO:app.main:[proj-concurrent] Generated new conversation_id conv-b6aa0fd8fa48 for new thread
+INFO:app.main:[proj-concurrent:conv-b6aa0fd8fa48] Non-streaming request
+INFO:app.main:[proj-concurrent] Generated new conversation_id conv-fa2d8485e49a for new thread
+INFO:app.main:[proj-concurrent:conv-fa2d8485e49a] Non-streaming request
+INFO:app.main:[proj-concurrent] Generated new conversation_id conv-92a4b7a6876c for new thread
+INFO:app.main:[proj-concurrent:conv-92a4b7a6876c] Non-streaming request
+INFO:httpx:HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 200 OK"
+INFO:app.database:Created conversation conv-fa2d8485e49a in project proj-concurrent
+INFO:app.main:[proj-concurrent:conv-fa2d8485e49a] Tokens: prompt=275, completion=14 | Retrieved: 0 items
+INFO:     127.0.0.1:63346 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:httpx:HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 200 OK"
+INFO:app.database:Created conversation conv-92a4b7a6876c in project proj-concurrent
+INFO:app.main:[proj-concurrent:conv-92a4b7a6876c] Tokens: prompt=275, completion=14 | Retrieved: 0 items
+INFO:     127.0.0.1:63347 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:httpx:HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 200 OK"
+INFO:app.database:Created conversation conv-b6aa0fd8fa48 in project proj-concurrent
+INFO:app.main:[proj-concurrent:conv-b6aa0fd8fa48] Tokens: prompt=275, completion=26 | Retrieved: 0 items
+INFO:     127.0.0.1:63344 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:httpx:HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 200 OK"
+INFO:app.database:Created conversation conv-ea871adca7ab in project proj-concurrent
+INFO:app.main:[proj-concurrent:conv-ea871adca7ab] Tokens: prompt=275, completion=19 | Retrieved: 0 items
+INFO:     127.0.0.1:63343 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+INFO:httpx:HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 200 OK"
+INFO:app.database:Created conversation conv-2f929a9fb75d in project proj-concurrent
+INFO:app.main:[proj-concurrent:conv-2f929a9fb75d] Tokens: prompt=275, completion=24 | Retrieved: 0 items
+INFO:     127.0.0.1:63345 - "POST /v1/chat/completions HTTP/1.1" 200 OK

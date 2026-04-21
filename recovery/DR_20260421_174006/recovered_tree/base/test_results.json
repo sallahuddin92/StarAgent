@@ -1,0 +1,65 @@
+{
+  "tests": [
+    {
+      "test": "Per-Project Isolation",
+      "claim": "Projects A and B maintain separate memory and conversations",
+      "status": "FAIL",
+      "command": "curl POST /v1/chat/completions",
+      "evidence": "Expecting value: line 1 column 1 (char 0)",
+      "timestamp": "2026-04-20T21:48:08.579029"
+    },
+    {
+      "test": "Semantic Retrieval",
+      "claim": "Query for 'pets' retrieves pet-related memories preferentially",
+      "status": "FAIL",
+      "command": "curl POST /v1/chat/completions",
+      "evidence": "Expecting value: line 1 column 1 (char 0)",
+      "timestamp": "2026-04-20T21:48:13.644899"
+    },
+    {
+      "test": "Streaming Stability",
+      "claim": "Streaming requests complete correctly with [DONE] marker",
+      "status": "PARTIAL",
+      "command": "curl -N POST /v1/chat/completions with stream=true (5 times)",
+      "evidence": "0/5 streaming requests completed successfully with [DONE] marker",
+      "timestamp": "2026-04-20T21:48:15.704830"
+    },
+    {
+      "test": "SQLite Concurrent Load",
+      "claim": "SQLite handles 5 concurrent requests without corruption",
+      "status": "PARTIAL",
+      "command": "5 concurrent curl POST /v1/chat/completions",
+      "evidence": "0/5 requests successful. Database integrity: ok",
+      "timestamp": "2026-04-20T21:48:17.738146"
+    },
+    {
+      "test": "Error Handling - Ollama Unavailable",
+      "claim": "Graceful error when Ollama is unavailable (502/503/error message)",
+      "status": "PASS",
+      "command": "docker stop ollama && curl POST /v1/chat/completions",
+      "evidence": "Status: 500. Response indicates error: True",
+      "timestamp": "2026-04-20T21:48:27.870688"
+    },
+    {
+      "test": "Error Handling - Embeddings Unavailable",
+      "claim": "System continues to work via fallback heuristic search",
+      "status": "PARTIAL",
+      "command": "curl POST /v1/chat/completions (with retrieval fallback)",
+      "evidence": "0/3 queries completed successfully even if embeddings unavailable",
+      "timestamp": "2026-04-20T21:48:30.934270"
+    },
+    {
+      "test": "Open WebUI Compatibility",
+      "claim": "All required endpoints available for Open WebUI integration",
+      "status": "FAIL",
+      "command": "curl /v1/models and /v1/chat/completions",
+      "evidence": "Expecting value: line 1 column 1 (char 0)",
+      "timestamp": "2026-04-20T21:48:32.953809"
+    }
+  ],
+  "summary": {
+    "passed": 1,
+    "failed": 3,
+    "partial": 3
+  }
+}

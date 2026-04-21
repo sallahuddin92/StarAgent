@@ -1,0 +1,28 @@
+# Runtime / local state
+.runtime/
+logs/
+server_*.log
+server.log
+
+# Local secrets / overrides
+.env
+.env.local
+
+# Data
+data/memory.db
+data/memory/
+
+# Sandbox writes (smoke tests default here)
+sandbox_test/
+
+# Release artifacts
+release_snapshots/
+
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+.vscode/

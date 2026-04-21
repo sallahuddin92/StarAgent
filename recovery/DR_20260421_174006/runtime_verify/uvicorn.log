@@ -1,0 +1,6 @@
+/Users/sallahuddin/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+INFO:app.database:Database initialized at /Users/sallahuddin/Desktop/macagent_proxy_starter/recovery/DR_20260421_174006/runtime_verify/memory.db with QueuePool and WAL mode
+INFO:app.tokenbudget:Initialized tiktoken with cl100k_base encoding
+INFO:sentence_transformers.SentenceTransformer:Use pytorch device_name: mps
+INFO:sentence_transformers.SentenceTransformer:Load pretrained SentenceTransformer: all-MiniLM-L6-v2
