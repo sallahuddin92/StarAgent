@@ -27,36 +27,56 @@ class StdioTransport:
         self.stdout = stdout or sys.stdout.buffer
 
     def read(self) -> Optional[StdioMessage]:
-        # Attempt header-based framing first.
-        headers = {}
-        line = self.stdin.readline()
-        if not line:
-            return None
+        """
+        Read the next message from stdin.
 
-        # Newline-delimited JSON fallback
-        if line.lstrip().startswith(b"{"):
-            try:
-                return StdioMessage(payload=json.loads(line.decode("utf-8")))
-            except Exception:
+        Important: a malformed frame or a stray blank line must NOT terminate the server.
+        We keep reading until we parse a valid message or hit EOF.
+        """
+        while True:
+            line = self.stdin.readline()
+            if not line:
                 return None
 
-        # Parse headers (first line already read)
-        while line and line.strip():
+            # Skip stray blank lines (some clients may emit keepalive newlines).
+            if not line.strip():
+                continue
+
+            # Newline-delimited JSON fallback
+            if line.lstrip().startswith(b"{"):
+                try:
+                    return StdioMessage(payload=json.loads(line.decode("utf-8")))
+                except Exception:
+                    continue
+
+            # Header-based framing (LSP style)
+            headers: Dict[str, str] = {}
+            while line and line.strip():
+                try:
+                    k, v = line.decode("utf-8").split(":", 1)
+                    headers[k.strip().lower()] = v.strip()
+                except Exception:
+                    pass
+                line = self.stdin.readline()
+                if not line:
+                    return None
+
+            if "content-length" not in headers:
+                # Malformed frame; keep scanning rather than exiting.
+                continue
+
             try:
-                k, v = line.decode("utf-8").split(":", 1)
-                headers[k.strip().lower()] = v.strip()
+                n = int(headers["content-length"])
             except Exception:
-                pass
-            line = self.stdin.readline()
+                continue
 
-        if "content-length" not in headers:
-            return None
-
-        n = int(headers["content-length"])
-        body = self.stdin.read(n)
-        if not body:
-            return None
-        return StdioMessage(payload=json.loads(body.decode("utf-8")))
+            body = self.stdin.read(n)
+            if not body or len(body) < n:
+                return None
+            try:
+                return StdioMessage(payload=json.loads(body.decode("utf-8")))
+            except Exception:
+                continue
 
     def write(self, payload: Dict[str, Any]) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -64,4 +84,3 @@ class StdioTransport:
         self.stdout.write(header)
         self.stdout.write(data)
         self.stdout.flush()
-

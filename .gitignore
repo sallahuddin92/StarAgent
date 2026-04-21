@@ -25,6 +25,9 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
+# Packaging artifacts
+*.egg-info/
+
 # OS / editor
 .DS_Store
 .vscode/

@@ -94,16 +94,32 @@ class MacAgentMCPServer:
         except Exception as e:
             return self._result(status="error", message=str(e))
 
-    def handle(self, req: Dict[str, Any]) -> Dict[str, Any]:
+    def handle(self, req: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         # JSON-RPC 2.0 style
         rid = req.get("id")
         method = req.get("method")
         params = req.get("params") or {}
 
+        # Notifications (no id) must not receive a response.
+        if rid is None:
+            if method in ("notifications/initialized", "notifications.initialized", "initialized"):
+                if self.debug:
+                    logger.info("MCP notification received: initialized")
+                return None
+            # Ignore other notifications silently for compatibility.
+            if self.debug:
+                logger.info(f"Ignoring MCP notification: {method}")
+            return None
+
         if method == "initialize":
+            # Claude Code expects protocolVersion echo + capabilities.
+            protocol_version = params.get("protocolVersion") or params.get("protocol_version") or "2024-11-05"
             result = {
+                "protocolVersion": protocol_version,
                 "serverInfo": {"name": "macagent-mcp", "version": "0.1"},
-                "capabilities": {"tools": {}},
+                "capabilities": {
+                    "tools": {"listChanged": False},
+                },
             }
             return {"jsonrpc": "2.0", "id": rid, "result": result}
 
@@ -128,6 +144,9 @@ class MacAgentMCPServer:
         if method == "ping":
             return {"jsonrpc": "2.0", "id": rid, "result": {}}
 
+        if method == "shutdown":
+            return {"jsonrpc": "2.0", "id": rid, "result": {}}
+
         return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"Method not found: {method}"}}
 
 
@@ -137,9 +156,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    # Keep stderr quiet by default; enable request-level debugging via env or flag.
+    debug = bool(args.debug or os.getenv("MACAGENT_MCP_DEBUG") == "1")
 
     client = MacAgentClient(MacAgentConfig.from_env())
-    server = MacAgentMCPServer(client, debug=args.debug)
+    server = MacAgentMCPServer(client, debug=debug)
     transport = StdioTransport()
 
     try:
@@ -148,7 +169,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             if msg is None:
                 break
             resp = server.handle(msg.payload)
-            transport.write(resp)
+            if resp is not None:
+                transport.write(resp)
     finally:
         client.close()
     return 0
@@ -156,4 +178,3 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
