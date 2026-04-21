@@ -24,6 +24,13 @@ Most MCP clients (Claude Code, Codex) will spawn the server as a subprocess. For
 python3 -m mcp.server
 ```
 
+## Install (Optional, enables `macagent-mcp` command)
+
+```bash
+python3 -m pip install -e .
+macagent-mcp
+```
+
 ## Tools exposed
 
 - `macagent_ask`
@@ -40,4 +47,3 @@ python3 -m mcp.server
 This prints the tool list using LSP-style `Content-Length` framing.
 ```bash
 python3 - <<'PY'\nimport json,sys,subprocess\np=subprocess.Popen([sys.executable,'-m','mcp.server'],stdin=subprocess.PIPE,stdout=subprocess.PIPE)\nreq={\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}\nmsg=json.dumps(req).encode('utf-8')\nframe=(f\"Content-Length: {len(msg)}\\r\\n\\r\\n\").encode('utf-8')+msg\np.stdin.write(frame); p.stdin.flush()\n# Read header\nhdr=b\"\"\nwhile b\"\\r\\n\\r\\n\" not in hdr:\n  hdr+=p.stdout.read(1)\ncl=int([l for l in hdr.decode().split('\\r\\n') if l.lower().startswith('content-length')][0].split(':',1)[1])\nbody=p.stdout.read(cl)\nprint(body.decode())\np.terminate()\nPY\n```
-

@@ -50,6 +50,14 @@ Key variables:
 - Smoke test: `./scripts/smoke_test_macagent.sh`
 - Validation (smoke + small regression guard): `./scripts/validate_macagent.sh`
 - Release snapshot: `./scripts/release_snapshot.sh`
+- MCP start (debug): `./scripts/start_macagent_mcp.sh`
+- MCP stop (debug): `./scripts/stop_macagent_mcp.sh`
+
+## CLI / MCP
+
+See:
+- [CLI_SETUP.md](/Users/sallahuddin/Desktop/macagent_proxy_starter/docs/CLI_SETUP.md)
+- [MCP_SETUP.md](/Users/sallahuddin/Desktop/macagent_proxy_starter/docs/MCP_SETUP.md)
 
 ## Logs and Runtime State
 
@@ -87,4 +95,3 @@ If resume breaks:
 1. Re-run the task from scratch in a new `conversation_id`.
 2. Ensure `MEMORY_DIR` remains intact and writable.
 3. Avoid manually deleting `data/memory/*.json` unless you intend to lose pending state.
-

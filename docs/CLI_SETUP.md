@@ -22,6 +22,22 @@ python3 -m cli.macagent ask "Reply with exactly OK"
 python3 -m cli.macagent agent "Inspect the app folder and identify the main API entry file."
 ```
 
+## Install (Optional, enables `macagent` command)
+
+This repo includes a minimal `pyproject.toml` with console scripts:
+
+```bash
+python3 -m pip install -e .
+macagent status
+macagent ask "Reply with exactly OK"
+```
+
+Note: CLI flags like `--json` must appear before the subcommand:
+
+```bash
+macagent --json ask "Reply with exactly OK"
+```
+
 ## Environment Variables
 
 - `MACAGENT_BASE_URL` (default `http://127.0.0.1:8095/v1`)
@@ -39,4 +55,3 @@ The CLI stores the last used `project_id` and `conversation_id` so that:
 
 State file:
 - `~/.macagent/context.json` (override with `MACAGENT_CLI_STATE_DIR`)
-
