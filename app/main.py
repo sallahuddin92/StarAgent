@@ -154,15 +154,16 @@ async def health() -> Dict[str, Any]:
 
 @app.get("/v1/models")
 async def list_models() -> Dict[str, Any]:
-    """List available models."""
+    """List available models (OpenAI-compatible)."""
+    # Open WebUI expects an OpenAI-like models list response.
+    model_name = os.getenv("DEFAULT_MODEL") or DEFAULT_MODEL or "gemma4:e2b"
     return {
         "object": "list",
         "data": [
             {
-                "id": DEFAULT_MODEL,
+                "id": model_name,
                 "object": "model",
-                "created": int(time.time()),
-                "owned_by": "local",
+                "owned_by": "macagent",
             }
         ],
     }
