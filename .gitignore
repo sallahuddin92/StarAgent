@@ -3,6 +3,15 @@
 logs/
 server_*.log
 server.log
+proxy_persistence.log
+
+# Disaster recovery / forensic artifacts (local-only)
+recovery/
+forensic_inventory.json
+history_files.txt
+recovery_mapping.json
+test_results.json
+sqlite_investigation.json
 
 # Local secrets / overrides
 .env
@@ -27,6 +36,8 @@ __pycache__/
 
 # Packaging artifacts
 *.egg-info/
+.venv/
+dist/
 
 # OS / editor
 .DS_Store

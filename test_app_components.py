@@ -10,9 +10,10 @@ import sqlite3
 import json
 from pathlib import Path
 
-# Setup path
-sys.path.insert(0, "/Users/sallahuddin/Desktop/macagent_proxy_starter")
-os.chdir("/Users/sallahuddin/Desktop/macagent_proxy_starter")
+# Setup path (repo-root relative; avoids machine-specific absolute paths)
+REPO_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO_ROOT))
+os.chdir(str(REPO_ROOT))
 
 print("\n" + "="*70)
 print("APPLICATION-LEVEL INVESTIGATION")

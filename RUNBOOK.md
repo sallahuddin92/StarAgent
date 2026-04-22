@@ -1,22 +1,27 @@
-# MacAgent Runbook (Recovered Runtime)
+# StarAgent Runbook (Recovered Runtime, legacy compatible: MacAgent)
 
-This repo contains a recovered, working MacAgent proxy runtime that exposes an OpenAI-compatible API for Open WebUI and local clients.
+This repo contains a recovered, working StarAgent proxy runtime that exposes an OpenAI-compatible API for Open WebUI and local clients.
 
 ## Quick Start
 
-1. Start MacAgent:
+1. Start StarAgent:
 ```bash
-./scripts/start_macagent.sh
+./scripts/start_staragent.sh
+```
+
+If this is a fresh checkout, run bootstrap first:
+```bash
+./scripts/bootstrap_staragent.sh
 ```
 
 2. Smoke test:
 ```bash
-./scripts/smoke_test_macagent.sh
+./scripts/smoke_test_staragent.sh
 ```
 
-3. Stop MacAgent:
+3. Stop StarAgent:
 ```bash
-./scripts/stop_macagent.sh
+./scripts/stop_staragent.sh
 ```
 
 ## URLs
@@ -32,37 +37,38 @@ Configuration is loaded in this order:
 2. `.env` (optional; not committed)
 3. defaults in scripts and `app/main.py`
 
-Use [.env.example](/Users/sallahuddin/Desktop/macagent_proxy_starter/.env.example) as the template.
+Use [.env.example](./.env.example) as the template.
 
 Key variables:
 
 - `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`)
 - `DEFAULT_MODEL` (default `gemma4:e2b`)
 - `PROXY_API_KEY` (default `local-dev-key`)
-- `HOST` / `PORT` (used by `scripts/start_macagent.sh`)
+- `HOST` / `PORT` (used by `scripts/start_staragent.sh`)
 - `MEMORY_DIR`, `DATABASE_PATH`
 - `LOG_LEVEL`
 
 ## Operational Scripts
 
-- Start: `./scripts/start_macagent.sh`
-- Stop: `./scripts/stop_macagent.sh`
-- Smoke test: `./scripts/smoke_test_macagent.sh`
-- Validation (smoke + small regression guard): `./scripts/validate_macagent.sh`
+- Start: `./scripts/start_staragent.sh` (legacy: `./scripts/start_macagent.sh`)
+- Stop: `./scripts/stop_staragent.sh` (legacy: `./scripts/stop_macagent.sh`)
+- Smoke test: `./scripts/smoke_test_staragent.sh` (legacy: `./scripts/smoke_test_macagent.sh`)
+- Validation (smoke + small regression guard): `./scripts/validate_staragent.sh` (legacy: `./scripts/validate_macagent.sh`)
+- Evaluation pack (API + Open WebUI-style + CLI + Claude MCP): `./scripts/eval_staragent.sh` (see `docs/EVALUATION.md`)
 - Release snapshot: `./scripts/release_snapshot.sh`
-- MCP start (debug): `./scripts/start_macagent_mcp.sh`
+- MCP start (debug): `./scripts/start_macagent_mcp.sh` (prints StarAgent name; pid/log file names remain legacy)
 - MCP stop (debug): `./scripts/stop_macagent_mcp.sh`
 
 ## CLI / MCP
 
 See:
-- [CLI_SETUP.md](/Users/sallahuddin/Desktop/macagent_proxy_starter/docs/CLI_SETUP.md)
-- [MCP_SETUP.md](/Users/sallahuddin/Desktop/macagent_proxy_starter/docs/MCP_SETUP.md)
+- [CLI_SETUP.md](./docs/CLI_SETUP.md)
+- [MCP_SETUP.md](./docs/MCP_SETUP.md)
 
 ## Logs and Runtime State
 
-- Server logs: `./logs/macagent_${PORT}.log`
-- PID file: `./.runtime/macagent_${PORT}.pid`
+- Server logs: `./logs/macagent_${PORT}.log` (legacy filename)
+- PID file: `./.runtime/macagent_${PORT}.pid` (legacy filename)
 - If `scripts/start_macagent.sh` starts Ollama: `./logs/ollama.log` and `./.runtime/ollama.pid`
 
 ## Daily Workflow Notes
@@ -86,9 +92,20 @@ To continue, send `continue` in the same `conversation_id` + `project_id`.
 
 ## Known Caveat: Approval/Continuation Persistence
 
-Approval and continuation state is persisted via the legacy JSON sidecar file under `MEMORY_DIR` and merged on load.
+Approval and continuation state is now persisted durably in SQLite (canonical), with legacy JSON sidecar used only for backward-compatible fallback/import.
 
-If the JSON sidecar files are deleted or moved, “yes/continue” resume may fail because pending agent state is missing.
+Precise storage locations:
+- Core memory is stored in SQLite (`DATABASE_PATH`, default `./data/memory.db`).
+- Pending agent state is stored in SQLite in the `conversations` table columns:
+  - `pending_approval`, `pending_plan`, `pending_history`, `pending_goal`
+  - These are saved/loaded via `app/database.py:DatabaseManager.save_memory_state/get_memory_state`
+  - `pending_*` structured fields are JSON-serialized in SQLite.
+- Legacy fallback/import (for older runs) may read pending state from the per-conversation JSON file:
+  - Path: `${MEMORY_DIR}/${slugify(project_id)}-${slugify(conversation_id)}.json` (see `app/memory.py:MemoryStore._path`)
+  - Fields: `pending_approval`, `pending_plan`, `pending_history`, `pending_goal`
+  - On load, these fields are imported into SQLite only if the SQLite pending fields are missing (see `app/memory.py:MemoryStore._load_from_db`).
+
+After this change, deleting/moving JSON sidecars should no longer break “yes/continue” as long as SQLite remains intact.
 
 If resume breaks:
 

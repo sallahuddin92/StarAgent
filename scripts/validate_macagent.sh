@@ -17,8 +17,8 @@ if [[ -f "$ROOT/.env" ]]; then
   set +a
 fi
 
-echo "[validate] Running smoke test..."
-"$ROOT/scripts/smoke_test_macagent.sh"
+echo "[validate] Running smoke test (StarAgent)..."
+"$ROOT/scripts/smoke_test_staragent.sh"
 
 echo
 echo "[validate] Basic agent-path regression guard: ensure internal fallback string is not returned."

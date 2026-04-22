@@ -15,9 +15,11 @@ import threading
 from pathlib import Path
 
 # Configuration
-PROXY_URL = "http://127.0.0.1:8081"
-AUTH_HEADER = {"Authorization": "Bearer local-dev-key", "Content-Type": "application/json"}
-DB_PATH = Path("/Users/sallahuddin/Desktop/macagent_proxy_starter/data/memory.db")
+REPO_ROOT = Path(__file__).resolve().parent
+PROXY_URL = os.environ.get("STARAGENT_HTTP_URL") or os.environ.get("MACAGENT_HTTP_URL") or "http://127.0.0.1:8095"
+_API_KEY = os.environ.get("STARAGENT_API_KEY") or os.environ.get("MACAGENT_API_KEY") or os.environ.get("PROXY_API_KEY") or "local-dev-key"
+AUTH_HEADER = {"Authorization": f"Bearer {_API_KEY}", "Content-Type": "application/json"}
+DB_PATH = REPO_ROOT / "data" / "memory.db"
 
 class Investigation:
     def __init__(self):
@@ -51,10 +53,10 @@ class Investigation:
         time.sleep(1)
         
         # Start new server
-        os.chdir("/Users/sallahuddin/Desktop/macagent_proxy_starter")
+        os.chdir(str(REPO_ROOT))
         with open(self.server_log, "w") as log_file:
             subprocess.Popen(
-                ["python3", "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8081"],
+                ["python3", "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(int(os.environ.get("PORT", "8095")))],
                 stdout=log_file,
                 stderr=log_file
             )
@@ -259,7 +261,7 @@ class Investigation:
     
     def save_report(self):
         """Save findings to JSON"""
-        report_file = Path("/Users/sallahuddin/Desktop/macagent_proxy_starter/sqlite_investigation.json")
+        report_file = REPO_ROOT / "sqlite_investigation.json"
         with open(report_file, "w") as f:
             json.dump(self.findings, f, indent=2)
         print(f"\n✅ Investigation saved to: {report_file}")

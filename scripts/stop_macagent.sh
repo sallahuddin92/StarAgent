@@ -35,11 +35,11 @@ kill_pid() {
   local cmd
   cmd="$(ps -p "$pid" -o command= || true)"
   if [[ "$cmd" != *"uvicorn"* || "$cmd" != *"app.main:app"* ]]; then
-    echo "[stop] Refusing to stop pid=$pid (not a MacAgent uvicorn process)." >&2
+    echo "[stop] Refusing to stop pid=$pid (not a StarAgent uvicorn process)." >&2
     echo "[stop] cmd: $cmd" >&2
     return 2
   fi
-  echo "[stop] Stopping MacAgent pid=$pid"
+  echo "[stop] Stopping StarAgent pid=$pid"
   kill "$pid" || true
   for _ in {1..40}; do
     if ! ps -p "$pid" >/dev/null 2>&1; then
@@ -72,5 +72,4 @@ if [[ -n "${pid_from_port}" ]]; then
   fi
 fi
 
-echo "[stop] No running MacAgent process found for port $PORT."
-
+echo "[stop] No running StarAgent process found for port $PORT."

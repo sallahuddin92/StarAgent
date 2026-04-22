@@ -14,13 +14,13 @@ This plan addresses the issue where `conversation_id` changes every turn, breaki
 
 ### Database Layer
 
-#### [MODIFY] [database.py](file:///Users/sallahuddin/Desktop/macagent_proxy_starter/app/database.py)
+#### [MODIFY] [app/database.py](app/database.py)
 - Add an index on `user_message` (or a hash of it) if necessary, but start with a simple query of `ArchiveTurn` to find existing conversations by content.
 - Update `get_or_create_conversation` to be more robust.
 
 ### Application Logic
 
-#### [MODIFY] [main.py](file:///Users/sallahuddin/Desktop/macagent_proxy_starter/app/main.py)
+#### [MODIFY] [app/main.py](app/main.py)
 - Replace `_derive_conversation_id` with a more stable implementation.
 - Introduce `_resolve_conversation_id` which:
     1. Checks `request.conversation_id`.
@@ -32,10 +32,10 @@ This plan addresses the issue where `conversation_id` changes every turn, breaki
 
 ### Verification
 
-#### [NEW] [MEMORY_RECALL_VERIFICATION.md](file:///Users/sallahuddin/Desktop/macagent_proxy_starter/MEMORY_RECALL_VERIFICATION.md)
+#### [NEW] [MEMORY_RECALL_VERIFICATION.md](MEMORY_RECALL_VERIFICATION.md)
 - Document the verification steps and results.
 
-#### [NEW] [test_memory_continuity.py](file:///Users/sallahuddin/Desktop/macagent_proxy_starter/scripts/test_memory_continuity.py)
+#### [NEW] [scripts/test_memory_continuity.py](scripts/test_memory_continuity.py)
 - A specialized test script to prove:
     - Multi-turn stability.
     - Same-project recall.

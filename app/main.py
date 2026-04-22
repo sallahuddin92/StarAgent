@@ -21,6 +21,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from .version import __version__
 from .memory import MemoryStore
 from .models import (
     ChatCompletionRequest,
@@ -46,6 +47,15 @@ from .routing import determine_execution_route, AGENT_PATH
 # Configuration
 load_dotenv()
 
+def _truthy_env(name: str, default: str = "false") -> bool:
+    v = os.getenv(name, default)
+    return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+STARAGENT_BRAND_API = _truthy_env("STARAGENT_BRAND_API", "false")
+API_SERVICE_NAME = "staragent-proxy" if STARAGENT_BRAND_API else "macagent-proxy"
+API_OWNED_BY = "staragent" if STARAGENT_BRAND_API else "macagent"
+
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_CHAT_PATH = os.getenv("OLLAMA_CHAT_PATH", "/api/chat")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemma4:e2b")
@@ -66,8 +76,8 @@ logger = logging.getLogger(__name__)
 
 # Initialize FastAPI
 app = FastAPI(
-    title="MacAgent Proxy",
-    version="2.0.0",
+    title="StarAgent Proxy" if STARAGENT_BRAND_API else "MacAgent Proxy",
+    version=__version__,
     description="Production-ready local memory proxy for Open WebUI + Ollama"
 )
 
@@ -104,7 +114,7 @@ _projects: Dict[str, ProjectInfo] = {}
 @app.on_event("startup")
 async def startup():
     """Initialize on startup."""
-    logger.info(f"Starting MacAgent Proxy v2.0.0")
+    logger.info(f"Starting {'StarAgent' if STARAGENT_BRAND_API else 'MacAgent'} Proxy v{__version__}")
     logger.info(f"Ollama: {OLLAMA_BASE_URL}")
     logger.info(f"Database: {DATABASE_PATH}")
     logger.info(f"Semantic Search: {USE_SEMANTIC_SEARCH}")
@@ -138,8 +148,8 @@ async def health() -> Dict[str, Any]:
     """Health check endpoint."""
     return {
         "ok": True,
-        "service": "macagent-proxy",
-        "version": "2.0.0",
+        "service": API_SERVICE_NAME,
+        "version": __version__,
         "ollama_base_url": OLLAMA_BASE_URL,
         "default_model": DEFAULT_MODEL,
         "features": {
@@ -163,7 +173,7 @@ async def list_models() -> Dict[str, Any]:
             {
                 "id": model_name,
                 "object": "model",
-                "owned_by": "macagent",
+                "owned_by": API_OWNED_BY,
             }
         ],
     }

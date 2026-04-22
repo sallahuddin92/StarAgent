@@ -29,6 +29,19 @@ class TestMCPTransportHandshake(unittest.TestCase):
         self.assertIsNotNone(msg)
         self.assertEqual(msg.payload["method"], "ping")
 
+    def test_transport_ndjson_round_trip(self):
+        stdin = io.BytesIO(b'{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}\n')
+        stdout = io.BytesIO()
+        t = StdioTransport(stdin=stdin, stdout=stdout)
+        msg = t.read()
+        self.assertIsNotNone(msg)
+        self.assertEqual(msg.payload["method"], "ping")
+
+        t.write({"jsonrpc": "2.0", "id": 1, "result": {}})
+        out = stdout.getvalue().decode("utf-8")
+        self.assertTrue(out.lstrip().startswith("{"))
+        self.assertNotIn("Content-Length:", out)
+
     def test_initialize_response_has_protocol_version(self):
         server = MacAgentMCPServer(_FakeClient())
         req = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}}
@@ -45,4 +58,3 @@ class TestMCPTransportHandshake(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

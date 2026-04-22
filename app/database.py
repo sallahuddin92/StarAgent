@@ -34,7 +34,13 @@ class Conversation(Base):
     constraints = Column(Text, default="[]")
     issues = Column(Text, default="[]")
     style_preferences = Column(Text, default="[]")
-    
+
+    # Agent-path pending resume state (durable; JSON-serialized where structured)
+    pending_approval = Column(Text, nullable=True)  # Dict[str, Any] as JSON
+    pending_plan = Column(Text, nullable=True)  # List[str] as JSON
+    pending_history = Column(Text, nullable=True)  # List[Dict[str, Any]] as JSON
+    pending_goal = Column(Text, nullable=True)  # str
+
     # Tracking
     turn_count = Column(Integer, default=0)
     last_compaction = Column(DateTime, nullable=True)
@@ -153,7 +159,39 @@ class DatabaseManager:
         
         # Create tables
         Base.metadata.create_all(self.engine)
+        self._ensure_pending_columns()
         logger.info(f"Database initialized at {db_path} with QueuePool and WAL mode")
+
+    def _ensure_pending_columns(self) -> None:
+        """
+        Minimal in-place migration to add pending_* columns to the existing
+        conversations table (we don't use Alembic in this repo).
+
+        Important: SQLAlchemy ORM will select these columns once declared, so
+        we must ensure they exist before any queries occur.
+        """
+        try:
+            with self.engine.connect() as conn:
+                rows = conn.exec_driver_sql("PRAGMA table_info(conversations)").fetchall()
+                cols = {r[1] for r in rows}  # (cid, name, type, notnull, dflt_value, pk)
+
+                alters = []
+                if "pending_approval" not in cols:
+                    alters.append("ALTER TABLE conversations ADD COLUMN pending_approval TEXT")
+                if "pending_plan" not in cols:
+                    alters.append("ALTER TABLE conversations ADD COLUMN pending_plan TEXT")
+                if "pending_history" not in cols:
+                    alters.append("ALTER TABLE conversations ADD COLUMN pending_history TEXT")
+                if "pending_goal" not in cols:
+                    alters.append("ALTER TABLE conversations ADD COLUMN pending_goal TEXT")
+
+                for stmt in alters:
+                    conn.exec_driver_sql(stmt)
+                if alters:
+                    conn.commit()
+                    logger.info(f"Added pending_* columns to conversations: {len(alters)}")
+        except Exception as e:
+            logger.warning(f"Pending-state schema migration skipped/failed: {e}")
     
     def get_session(self):
         """Get a new database session."""
@@ -210,7 +248,7 @@ class DatabaseManager:
         project_id: str,
         state: Dict[str, Any]
     ) -> None:
-        """Save memory state (project_summary, decisions, etc.)."""
+        """Save memory state (project_summary, decisions, etc.), including pending agent resume state."""
         session = self.get_session()
         try:
             conv = self.get_or_create_conversation(conversation_id, project_id)
@@ -222,6 +260,17 @@ class DatabaseManager:
             conv.style_preferences = json.dumps(state.get("style_preferences", [])[:20])
             conv.turn_count = state.get("turn_count", 0)
             conv.updated_at = datetime.utcnow()
+
+            # Durable pending state (canonical)
+            pending_approval = state.get("pending_approval")
+            pending_plan = state.get("pending_plan")
+            pending_history = state.get("pending_history")
+            pending_goal = state.get("pending_goal")
+
+            conv.pending_approval = json.dumps(pending_approval) if pending_approval is not None else None
+            conv.pending_plan = json.dumps(pending_plan) if pending_plan is not None else None
+            conv.pending_history = json.dumps(pending_history) if pending_history is not None else None
+            conv.pending_goal = pending_goal if pending_goal is not None else None
             
             session.add(conv)
             session.commit()
@@ -240,7 +289,11 @@ class DatabaseManager:
                     "constraints": [],
                     "issues": [],
                     "style_preferences": [],
-                    "turn_count": 0
+                    "turn_count": 0,
+                    "pending_approval": None,
+                    "pending_plan": None,
+                    "pending_history": None,
+                    "pending_goal": None,
                 }
             
             return {
@@ -249,7 +302,11 @@ class DatabaseManager:
                 "constraints": json.loads(conv.constraints or "[]"),
                 "issues": json.loads(conv.issues or "[]"),
                 "style_preferences": json.loads(conv.style_preferences or "[]"),
-                "turn_count": conv.turn_count
+                "turn_count": conv.turn_count,
+                "pending_approval": json.loads(conv.pending_approval) if getattr(conv, "pending_approval", None) else None,
+                "pending_plan": json.loads(conv.pending_plan) if getattr(conv, "pending_plan", None) else None,
+                "pending_history": json.loads(conv.pending_history) if getattr(conv, "pending_history", None) else None,
+                "pending_goal": getattr(conv, "pending_goal", None),
             }
         finally:
             session.close()
@@ -381,7 +438,13 @@ class DatabaseManager:
                     "decisions": data.get("decisions", []),
                     "constraints": data.get("constraints", []),
                     "issues": data.get("issues", []),
-                    "style_preferences": data.get("style_preferences", [])
+                    "style_preferences": data.get("style_preferences", []),
+                    "turn_count": data.get("turn_count", 0),
+                    # Pending agent resume state (if any)
+                    "pending_approval": data.get("pending_approval"),
+                    "pending_plan": data.get("pending_plan"),
+                    "pending_history": data.get("pending_history"),
+                    "pending_goal": data.get("pending_goal"),
                 })
                 
                 # Restore archive turns

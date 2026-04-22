@@ -79,13 +79,13 @@ else
   bad "/health did not return ok:true"
 fi
 
-phase "2) Fast Path Chat (MACAGENT_OK)"
-resp="$(chat "smoke-fast" "smoke-fast-${ts}" "Reply with exactly MACAGENT_OK and nothing else.")"
+phase "2) Fast Path Chat (STARAGENT_OK)"
+resp="$(chat "smoke-fast" "smoke-fast-${ts}" "Reply with exactly STARAGENT_OK and nothing else.")"
 content="$(printf "%s" "$resp" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["choices"][0]["message"]["content"].strip())')"
-if [[ "$content" == "MACAGENT_OK" || "$content" == *"MACAGENT_OK"* ]]; then
+if [[ "$content" == "STARAGENT_OK" || "$content" == *"STARAGENT_OK"* ]]; then
   ok
 else
-  bad "Expected MACAGENT_OK, got: ${content}"
+  bad "Expected STARAGENT_OK, got: ${content}"
 fi
 
 phase "3) Memory Continuity (store + recall FastAPI)"

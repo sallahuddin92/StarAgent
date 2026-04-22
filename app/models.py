@@ -32,7 +32,7 @@ class MemoryState(BaseModel):
     style_preferences: List[str] = Field(default_factory=list)
     archive_turns: List[Dict[str, str]] = Field(default_factory=list)
     turn_count: int = 0
-    # Agent-path continuation state (persisted via legacy JSON; DB stores core memory only).
+    # Agent-path continuation state (canonical in SQLite; legacy JSON sidecar is fallback/import only).
     pending_approval: Optional[Dict[str, Any]] = None
     pending_plan: Optional[List[str]] = None
     pending_history: Optional[List[Dict[str, Any]]] = None

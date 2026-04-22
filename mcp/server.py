@@ -39,16 +39,31 @@ class MacAgentMCPServer:
             "debug_raw": {"type": "boolean", "description": "Include raw response for debugging"},
         }
         prompt_props = {"prompt": {"type": "string", "description": "User prompt"}}
-        return [
-            _tool_schema("macagent_ask", "Fast-path ask through MacAgent (forced fast route).", {**prompt_props, **common_props}, required=["prompt"]),
-            _tool_schema("macagent_agent", "Agent-path task through MacAgent (forced agent route).", {**prompt_props, **common_props}, required=["prompt"]),
-            _tool_schema("macagent_approve", "Approve pending action (send yes).", common_props),
-            _tool_schema("macagent_reject", "Reject pending action (send no).", common_props),
-            _tool_schema("macagent_continue", "Continue pending partial task (send continue).", common_props),
-            _tool_schema("macagent_status", "Return health/models and client context.", common_props),
-            _tool_schema("macagent_rollback", "Best-effort rollback through agent path.", common_props),
-            _tool_schema("macagent_smoke_test", "Run compact smoke test against the API.", common_props),
+        # Tool names are part of external integrations. Provide StarAgent-prefixed
+        # aliases while preserving the original macagent_* tool names.
+        tools = [
+            _tool_schema("staragent_ask", "Fast-path ask through StarAgent (forced fast route).", {**prompt_props, **common_props}, required=["prompt"]),
+            _tool_schema("staragent_agent", "Agent-path task through StarAgent (forced agent route).", {**prompt_props, **common_props}, required=["prompt"]),
+            _tool_schema("staragent_approve", "Approve pending action (send yes).", common_props),
+            _tool_schema("staragent_reject", "Reject pending action (send no).", common_props),
+            _tool_schema("staragent_continue", "Continue pending partial task (send continue).", common_props),
+            _tool_schema("staragent_status", "Return health/models and client context.", common_props),
+            _tool_schema("staragent_rollback", "Best-effort rollback through agent path.", common_props),
+            _tool_schema("staragent_smoke_test", "Run compact smoke test against the API.", common_props),
         ]
+        tools.extend(
+            [
+                _tool_schema("macagent_ask", "Fast-path ask through StarAgent (legacy tool name: macagent_ask).", {**prompt_props, **common_props}, required=["prompt"]),
+                _tool_schema("macagent_agent", "Agent-path task through StarAgent (legacy tool name: macagent_agent).", {**prompt_props, **common_props}, required=["prompt"]),
+                _tool_schema("macagent_approve", "Approve pending action (legacy tool name: macagent_approve).", common_props),
+                _tool_schema("macagent_reject", "Reject pending action (legacy tool name: macagent_reject).", common_props),
+                _tool_schema("macagent_continue", "Continue pending partial task (legacy tool name: macagent_continue).", common_props),
+                _tool_schema("macagent_status", "Return health/models and client context (legacy tool name: macagent_status).", common_props),
+                _tool_schema("macagent_rollback", "Best-effort rollback (legacy tool name: macagent_rollback).", common_props),
+                _tool_schema("macagent_smoke_test", "Run compact smoke test (legacy tool name: macagent_smoke_test).", common_props),
+            ]
+        )
+        return tools
 
     def _result(self, *, status: str, message: str = "", data: Optional[Dict[str, Any]] = None, agent_status: Optional[str] = None, raw: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         out: Dict[str, Any] = {"status": status, "message": message, "data": data or {}}
@@ -63,6 +78,10 @@ class MacAgentMCPServer:
         conversation_id = args.get("conversation_id")
         model = args.get("model")
         debug_raw = bool(args.get("debug_raw", False))
+
+        # Normalize StarAgent tool aliases to their legacy equivalents.
+        if name.startswith("staragent_"):
+            name = "macagent_" + name[len("staragent_") :]
 
         try:
             if name == "macagent_ask":
@@ -116,7 +135,7 @@ class MacAgentMCPServer:
             protocol_version = params.get("protocolVersion") or params.get("protocol_version") or "2024-11-05"
             result = {
                 "protocolVersion": protocol_version,
-                "serverInfo": {"name": "macagent-mcp", "version": "0.1"},
+                "serverInfo": {"name": "staragent-mcp", "version": "0.1"},
                 "capabilities": {
                     "tools": {"listChanged": False},
                 },
@@ -151,13 +170,14 @@ class MacAgentMCPServer:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser(prog="macagent-mcp", description="MacAgent MCP server (stdio)")
+    prog = os.path.basename(sys.argv[0] or "") or "staragent-mcp"
+    ap = argparse.ArgumentParser(prog=prog, description="StarAgent MCP server (stdio) (legacy compatible: macagent tools)")
     ap.add_argument("--debug", action="store_true", help="Include raw responses in tool outputs")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
     # Keep stderr quiet by default; enable request-level debugging via env or flag.
-    debug = bool(args.debug or os.getenv("MACAGENT_MCP_DEBUG") == "1")
+    debug = bool(args.debug or os.getenv("STARAGENT_MCP_DEBUG") == "1" or os.getenv("MACAGENT_MCP_DEBUG") == "1")
 
     client = MacAgentClient(MacAgentConfig.from_env())
     server = MacAgentMCPServer(client, debug=debug)

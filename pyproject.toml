@@ -1,13 +1,14 @@
 [project]
-name = "macagent"
-version = "0.1.0"
-description = "MacAgent proxy + CLI + MCP server (local)"
+name = "staragent"
+version = "2.0.0"
+description = "StarAgent proxy + CLI + MCP server (local) (legacy compatible: macagent)"
 requires-python = ">=3.9"
 
 [project.scripts]
 macagent = "cli.macagent:main"
 macagent-mcp = "mcp.server:main"
+staragent = "cli.staragent:main"
+staragent-mcp = "mcp.server:main"
 
 [tool.setuptools]
 packages = ["app", "cli", "client", "mcp"]
-

@@ -7,7 +7,7 @@ cd "$ROOT"
 mkdir -p "$ROOT/release_snapshots"
 
 ts="$(date +%Y%m%d_%H%M%S)"
-out="$ROOT/release_snapshots/macagent_snapshot_${ts}.tgz"
+out="$ROOT/release_snapshots/staragent_snapshot_${ts}.tgz"
 
 # By default, snapshot code and docs only. Runtime artifacts can be included explicitly.
 include_runtime="${INCLUDE_RUNTIME:-0}"
@@ -44,4 +44,3 @@ fi
 tar -czf "$out" "${exclude_args[@]}" .
 
 echo "[snapshot] OK"
-

@@ -13,7 +13,17 @@ from client.macagent_client import MacAgentClient, MacAgentConfig
 
 def _state_path() -> Path:
     # Persist local operator context so approve/continue works without re-typing ids.
-    d = os.getenv("MACAGENT_CLI_STATE_DIR") or str(Path.home() / ".macagent")
+    # Prefer StarAgent directory, but transparently read legacy ~/.macagent if it exists.
+    env_dir = os.getenv("STARAGENT_CLI_STATE_DIR") or os.getenv("MACAGENT_CLI_STATE_DIR")
+    if env_dir:
+        d = env_dir
+    else:
+        star = Path.home() / ".staragent"
+        legacy = Path.home() / ".macagent"
+        if (star / "context.json").exists() or not (legacy / "context.json").exists():
+            d = str(star)
+        else:
+            d = str(legacy)
     p = Path(d)
     p.mkdir(parents=True, exist_ok=True)
     return p / "context.json"
@@ -36,10 +46,16 @@ def _save_state(state: Dict[str, Any]) -> None:
 
 def _resolve_context(args: argparse.Namespace) -> Dict[str, str]:
     state = _load_state()
-    project_id = args.project_id or state.get("project_id") or os.getenv("MACAGENT_DEFAULT_PROJECT") or "default"
+    project_id = (
+        args.project_id
+        or state.get("project_id")
+        or os.getenv("STARAGENT_DEFAULT_PROJECT")
+        or os.getenv("MACAGENT_DEFAULT_PROJECT")
+        or "default"
+    )
     conversation_id = args.conversation_id or state.get("conversation_id")
     if not conversation_id:
-        prefix = os.getenv("MACAGENT_DEFAULT_CONVERSATION_PREFIX") or "cli"
+        prefix = os.getenv("STARAGENT_DEFAULT_CONVERSATION_PREFIX") or os.getenv("MACAGENT_DEFAULT_CONVERSATION_PREFIX") or "cli"
         conversation_id = f"{prefix}-{int(time.time())}"
     # Update state.
     state["project_id"] = project_id
@@ -56,11 +72,27 @@ def _print_result(result, *, as_json: bool) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="macagent", description="MacAgent CLI (thin client over FastAPI runtime)")
-    p.add_argument("--base-url", dest="base_url", default=os.getenv("MACAGENT_BASE_URL", ""), help="MacAgent base URL (default: env MACAGENT_BASE_URL or http://127.0.0.1:8095/v1)")
-    p.add_argument("--api-key", dest="api_key", default=os.getenv("MACAGENT_API_KEY", ""), help="API key (default: env MACAGENT_API_KEY or PROXY_API_KEY)")
-    p.add_argument("--model", dest="model", default=os.getenv("MACAGENT_DEFAULT_MODEL", ""), help="Model id (default: env MACAGENT_DEFAULT_MODEL or DEFAULT_MODEL)")
-    p.add_argument("--project", dest="project_id", default=None, help="project_id (default: stored context or env MACAGENT_DEFAULT_PROJECT)")
+    prog = os.getenv("STARAGENT_CLI_PROG") or os.getenv("MACAGENT_CLI_PROG") or os.path.basename(sys.argv[0] or "") or "staragent"
+    p = argparse.ArgumentParser(prog=prog, description="StarAgent CLI (thin client over the existing FastAPI runtime; legacy compatible: macagent)")
+    p.add_argument(
+        "--base-url",
+        dest="base_url",
+        default=os.getenv("STARAGENT_BASE_URL") or os.getenv("MACAGENT_BASE_URL") or "",
+        help="Base URL (default: STARAGENT_BASE_URL / MACAGENT_BASE_URL or http://127.0.0.1:8095/v1)",
+    )
+    p.add_argument(
+        "--api-key",
+        dest="api_key",
+        default=os.getenv("STARAGENT_API_KEY") or os.getenv("MACAGENT_API_KEY") or "",
+        help="API key (default: STARAGENT_API_KEY / MACAGENT_API_KEY / PROXY_API_KEY)",
+    )
+    p.add_argument(
+        "--model",
+        dest="model",
+        default=os.getenv("STARAGENT_DEFAULT_MODEL") or os.getenv("MACAGENT_DEFAULT_MODEL") or "",
+        help="Model id (default: STARAGENT_DEFAULT_MODEL / MACAGENT_DEFAULT_MODEL / DEFAULT_MODEL)",
+    )
+    p.add_argument("--project", dest="project_id", default=None, help="project_id (default: stored context or STARAGENT_DEFAULT_PROJECT / MACAGENT_DEFAULT_PROJECT)")
     p.add_argument("--conversation", dest="conversation_id", default=None, help="conversation_id (default: stored context)")
     p.add_argument("--json", dest="as_json", action="store_true", help="Print machine-friendly JSON output")
 
@@ -141,4 +173,3 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

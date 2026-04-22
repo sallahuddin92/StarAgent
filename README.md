@@ -1,136 +1,146 @@
-# MacAgent Proxy Starter
+# StarAgent
 
-Thin local middleware for **Open WebUI -> Memory Proxy -> Ollama**.
+Local, long-horizon AI engineering runtime for Ollama: OpenAI-compatible API, CLI, Open WebUI integration, and an MCP server for Claude Code and Codex.
 
-This starter is designed for a **small local model** such as `gemma4:e2b`.
-Instead of replaying the full raw chat history every turn, it:
+StarAgent is designed to be a practical control plane over a local model such as `gemma4:e2b` (Ollama stays the inference plane).
 
-1. stores a compact project memory
-2. retrieves relevant prior context
-3. assembles a cleaner prompt packet
-4. forwards the request to Ollama
-5. updates compact memory after the response
+## What StarAgent Is
 
-## What this gives you
+StarAgent sits between your clients and Ollama and provides:
 
-- normal chat UX in Open WebUI
-- background memory compaction
-- long project continuity without stuffing raw history every turn
-- local-first architecture
+- fast-path chat for normal Q&A
+- agent-path execution for repo inspection and multi-step tasks
+- long-horizon memory stored in SQLite (project and conversation scoped)
+- approval-gated writes (no silent filesystem writes)
+- continuation and resume (`yes` / `continue`)
+- verification and rollback flows
 
-## Included
+## Surfaces
 
-- `app/main.py` - FastAPI proxy with OpenAI-compatible `/v1/chat/completions`
-- `app/memory.py` - compact memory store and retrieval logic
-- `app/prompting.py` - prompt assembly helpers
-- `app/models.py` - request/response models
-- `templates/system_prompt.txt` - system policy for small-model prompt continuity
-- `templates/memory_compactor_prompt.txt` - optional future compactor template
-- `data/memory/` - JSON memory store
-- `.env.example` - environment variables
-- `docker-compose.yml` - proxy container starter
-- `requirements.txt`
+| Surface | What you use | Typical use |
+|---|---|---|
+| OpenAI-compatible API | `http://127.0.0.1:8095/v1` | Open WebUI, local apps |
+| CLI | `staragent …` | terminal workflows |
+| Open WebUI | point WebUI to StarAgent | chat UI + approvals |
+| MCP server | `staragent-mcp` | Claude Code / Codex tool calls |
 
 ## Architecture
 
-```text
-Open WebUI -> Local Proxy -> Ollama
-                 |
-                 +-> compact memory store (JSON)
+```mermaid
+flowchart LR
+  U["Developer"] -->|CLI| CLI["staragent (CLI)"]
+  U -->|Open WebUI| WEBUI["Open WebUI"]
+  U -->|Claude Code / Codex| MCPCLIENT["MCP-capable client"]
+
+  CLI --> API["StarAgent FastAPI (/v1)"]
+  WEBUI --> API
+  MCPCLIENT --> MCP["staragent-mcp (stdio)"]
+  MCP --> API
+
+  API --> MEM["SQLite Memory + Pending State"]
+  API --> EXEC["Planner / Executor\n(agent path)"]
+  EXEC --> TOOLS["Tools (repo read, sandbox write w/ approval,\nverification, rollback)"]
+  API --> OLLAMA["Ollama (gemma4:e2b)"]
 ```
 
-## Quick start
+## Workflow: Approval + Resume
 
-### 1. Run Ollama
+```mermaid
+sequenceDiagram
+  participant Client as "Client (WebUI/CLI/MCP)"
+  participant SA as "StarAgent"
+  participant FS as "Filesystem (sandbox_test/)"
 
-Make sure Ollama is running locally and the model exists.
+  Client->>SA: "Create a file …"
+  SA-->>Client: "approval_required (proposed diff/action)"
+  Client->>SA: "yes"
+  SA->>FS: "write"
+  SA-->>Client: "completed (grounded result)"
+```
 
-Example:
+## Quickstart (Local)
+
+Prereqs:
+
+- Python 3.9+
+- Ollama running on `http://127.0.0.1:11434`
+- Model installed (default: `gemma4:e2b`)
+
+Bootstrap and run:
 
 ```bash
-ollama serve
-ollama pull gemma4:e2b
+./scripts/bootstrap_staragent.sh
+./scripts/start_staragent.sh
+./scripts/smoke_test_staragent.sh
+./scripts/stop_staragent.sh
 ```
 
-### 2. Create env file
+Manual sanity checks:
 
 ```bash
-cp .env.example .env
+curl -s http://127.0.0.1:8095/health | python3 -m json.tool
+curl -s http://127.0.0.1:8095/v1/models | python3 -m json.tool
 ```
 
-### 3. Run locally
+## CLI Examples
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8081 --reload
+staragent status
+staragent ask "Reply with exactly: OK"
+staragent agent "Inspect the app folder and identify the main API entry file."
 ```
 
-### 4. Connect Open WebUI
+Approval-gated write (sandbox only):
 
-Point Open WebUI to:
-
-```text
-http://host.docker.internal:8081/v1
+```bash
+staragent agent "Create sandbox_test/hello.txt with content: hello"
+staragent approve
 ```
 
-If you run everything on the same machine without Docker networking issues, use:
+## Open WebUI Setup
 
-```text
-http://127.0.0.1:8081/v1
+See [docs/OPEN_WEBUI_SETUP.md](docs/OPEN_WEBUI_SETUP.md).
+
+StarAgent exposes an OpenAI-compatible API. WebUI typically needs:
+
+- Base URL: `http://host.docker.internal:8095/v1` (if WebUI is in Docker)
+- API key: your `PROXY_API_KEY` (local default is acceptable for local-only use)
+- Model: `gemma4:e2b`
+
+## MCP (Claude Code / Codex) Setup
+
+See:
+
+- [docs/MCP_SETUP.md](docs/MCP_SETUP.md)
+- [docs/CLAUDE_CODE_MCP_SETUP.md](docs/CLAUDE_CODE_MCP_SETUP.md)
+- [docs/CODEX_MCP_SETUP.md](docs/CODEX_MCP_SETUP.md)
+
+Start MCP server (stdio):
+
+```bash
+./scripts/start_staragent_mcp.sh
 ```
 
-Set any placeholder API key if the UI requires one.
+## Repo Layout
 
-## How memory works
+- `app/`: FastAPI runtime, memory, planner/executor, tools, approval, verification/rollback
+- `client/`: shared HTTP client used by CLI and MCP
+- `cli/`: `staragent` and legacy `macagent` CLI entrypoints
+- `mcp/`: MCP server and stdio transport
+- `scripts/`: bootstrap, start/stop, smoke/validate, release helpers
+- `docs/`: setup docs and evaluation notes
+- `templates/`: prompt templates
 
-Each conversation gets a JSON file in `data/memory/`:
+## Compatibility Notes
 
-- `project_summary`
-- `decisions`
-- `constraints`
-- `issues`
-- `style_preferences`
-- `archive_turns`
+StarAgent preserves legacy `macagent` CLI/MCP names and `MACAGENT_*` environment variables for now. See [docs/COMPATIBILITY_MAP.md](docs/COMPATIBILITY_MAP.md).
 
-The proxy builds each request from:
+## Known Limitations (Honest)
 
-1. base system prompt
-2. compact working memory
-3. retrieved relevant history snippets
-4. recent user request
+- Local model quality varies; small models may need careful prompting.
+- StarAgent is local-first. Do not expose the API to untrusted networks without hardening auth and transport.
+- Persistence has been hardened into SQLite, but operational edge cases should still be validated in your environment.
 
-## Current limitations
+## Status
 
-This starter is intentionally simple:
-
-- JSON memory, not vector DB
-- keyword retrieval, not embeddings
-- lightweight heuristic compaction
-- single-node local setup
-
-## Best next upgrades for Antigravity
-
-1. replace JSON retrieval with SQLite + embeddings
-2. add explicit `/memory/lock` and `/memory/reset` endpoints
-3. separate project memory from conversation memory
-4. add token estimation and auto-trimming
-5. support tool routing and local code execution
-6. add import of repo summaries / docs / logs into memory
-
-## Suggested Open WebUI usage
-
-Use this as a normal chat endpoint. The proxy silently handles:
-
-- context carry-forward
-- compaction
-- retrieval
-- prompt assembly
-
-You can still help the system by writing messages like:
-
-- `remember this decision: use local sqlite`
-- `replace previous plan with this`
-- `ignore the old timezone workaround`
-
+Technical release ready: developer-focused, local-first, and meant for iterative hardening with real usage.

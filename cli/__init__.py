@@ -1,2 +1,1 @@
-"""MacAgent CLI package."""
-
+"""StarAgent CLI package (legacy compatible: macagent)."""

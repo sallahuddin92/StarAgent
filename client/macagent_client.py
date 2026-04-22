@@ -20,11 +20,29 @@ class MacAgentConfig:
 
     @staticmethod
     def from_env() -> "MacAgentConfig":
-        base = os.getenv("MACAGENT_BASE_URL") or os.getenv("MACAGENT_API_BASE_URL") or "http://127.0.0.1:8095/v1"
-        api_key = os.getenv("MACAGENT_API_KEY") or os.getenv("PROXY_API_KEY") or "local-dev-key"
-        model = os.getenv("MACAGENT_DEFAULT_MODEL") or os.getenv("DEFAULT_MODEL") or "gemma4:e2b"
-        proj = os.getenv("MACAGENT_DEFAULT_PROJECT") or "default"
-        conv = os.getenv("MACAGENT_DEFAULT_CONVERSATION") or "default"
+        # StarAgent is the user-facing product name. For compatibility, we still
+        # accept the legacy MACAGENT_* variables.
+        base = (
+            os.getenv("STARAGENT_BASE_URL")
+            or os.getenv("STARAGENT_API_BASE_URL")
+            or os.getenv("MACAGENT_BASE_URL")
+            or os.getenv("MACAGENT_API_BASE_URL")
+            or "http://127.0.0.1:8095/v1"
+        )
+        api_key = (
+            os.getenv("STARAGENT_API_KEY")
+            or os.getenv("MACAGENT_API_KEY")
+            or os.getenv("PROXY_API_KEY")
+            or "local-dev-key"
+        )
+        model = (
+            os.getenv("STARAGENT_DEFAULT_MODEL")
+            or os.getenv("MACAGENT_DEFAULT_MODEL")
+            or os.getenv("DEFAULT_MODEL")
+            or "gemma4:e2b"
+        )
+        proj = os.getenv("STARAGENT_DEFAULT_PROJECT") or os.getenv("MACAGENT_DEFAULT_PROJECT") or "default"
+        conv = os.getenv("STARAGENT_DEFAULT_CONVERSATION") or os.getenv("MACAGENT_DEFAULT_CONVERSATION") or "default"
         return MacAgentConfig(base_url=base, api_key=api_key, default_model=model, default_project_id=proj, default_conversation_id=conv)
 
 
@@ -155,8 +173,8 @@ class MacAgentClient:
             return {"ok": False, "results": results}
 
         try:
-            out = self.ask("Reply with exactly MACAGENT_OK", project_id=project, conversation_id=conv).message.strip()
-            record("fast_path", "MACAGENT_OK" in out, out[:200])
+            out = self.ask("Reply with exactly STARAGENT_OK", project_id=project, conversation_id=conv).message.strip()
+            record("fast_path", "STARAGENT_OK" in out, out[:200])
         except Exception as e:
             record("fast_path", False, str(e))
 
@@ -186,4 +204,3 @@ class MacAgentClient:
 
         ok = all(r["ok"] for r in results)
         return {"ok": ok, "results": results}
-

@@ -68,17 +68,23 @@ class MemoryStore:
             project_id=project_id,
             **state_dict
         )
-        # Merge agent continuation state from legacy JSON (SQLite stores only core memory fields).
-        # This is intentionally narrow to avoid changing fast-path memory behavior.
+        # Backward-compatible import: if SQLite pending state is missing but legacy JSON has it,
+        # import it once so future resumes do not depend on the JSON sidecar.
         try:
-            legacy_path = self._path(conversation_id, project_id)
-            if legacy_path.exists():
-                legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
-                for k in ("pending_approval", "pending_plan", "pending_history", "pending_goal"):
-                    if legacy.get(k) is not None:
-                        setattr(state, k, legacy.get(k))
+            if self.db:
+                legacy_path = self._path(conversation_id, project_id)
+                if legacy_path.exists():
+                    legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
+                    imported = False
+                    for k in ("pending_approval", "pending_plan", "pending_history", "pending_goal"):
+                        if getattr(state, k) is None and legacy.get(k) is not None:
+                            setattr(state, k, legacy.get(k))
+                            imported = True
+                    if imported:
+                        # Persist imported pending state to SQLite (canonical).
+                        self.db.save_memory_state(conversation_id, project_id, state.model_dump())
         except Exception as e:
-            logger.warning(f"Failed to merge legacy agent state for {conversation_id}: {e}")
+            logger.warning(f"Failed to import legacy pending agent state for {conversation_id}: {e}")
         return state
     
     def _load_from_json(self, conversation_id: str, project_id: str = "default") -> MemoryState:

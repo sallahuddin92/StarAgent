@@ -6,6 +6,15 @@ cd "$ROOT"
 
 mkdir -p "$ROOT/.runtime" "$ROOT/logs" "$ROOT/sandbox_test"
 
+PYTHON="${STARAGENT_PYTHON:-}"
+if [[ -z "$PYTHON" ]]; then
+  if [[ -x "$ROOT/.venv/bin/python" ]]; then
+    PYTHON="$ROOT/.venv/bin/python"
+  else
+    PYTHON="python3"
+  fi
+fi
+
 load_env() {
   # Prefer local overrides; do not error if missing.
   if [[ -f "$ROOT/.env.local" ]]; then
@@ -40,7 +49,7 @@ echo "[start] Model: $DEFAULT_MODEL"
 echo "[start] Bind: ${HOST}:${PORT}"
 echo "[start] Log: $LOGFILE"
 
-python3 - <<'PY' >/dev/null
+"$PYTHON" - <<'PY' >/dev/null
 import importlib.util
 mods = ["fastapi", "uvicorn", "httpx", "dotenv", "tenacity"]
 missing = [m for m in mods if importlib.util.find_spec(m) is None]
@@ -48,7 +57,7 @@ if missing:
   raise SystemExit("Missing Python deps: " + ", ".join(missing))
 PY
 
-if ! python3 -m uvicorn --version >/dev/null 2>&1; then
+if ! "$PYTHON" -m uvicorn --version >/dev/null 2>&1; then
   echo "[start] ERROR: uvicorn is not available in python3 environment." >&2
   exit 1
 fi
@@ -58,7 +67,7 @@ if [[ -f "$PIDFILE" ]]; then
   if [[ -n "${pid}" ]] && ps -p "$pid" >/dev/null 2>&1; then
     cmd="$(ps -p "$pid" -o command= | tr -d '\n' || true)"
     if [[ "$cmd" == *"uvicorn"* && "$cmd" == *"app.main:app"* && "$cmd" == *"--port $PORT"* ]]; then
-      echo "[start] MacAgent already running (pid=$pid)."
+      echo "[start] StarAgent already running (pid=$pid)."
       echo "[start] URLs:"
       echo "  Health: http://127.0.0.1:${PORT}/health"
       echo "  OpenAI base: http://127.0.0.1:${PORT}/v1"
@@ -69,6 +78,18 @@ if [[ -f "$PIDFILE" ]]; then
 fi
 
 if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  pid_from_port="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$pid_from_port" ]]; then
+    cmd="$(ps -p "$pid_from_port" -o command= 2>/dev/null | tr -d '\n' || true)"
+    if [[ "$cmd" == *"uvicorn"* && "$cmd" == *"app.main:app"* && "$cmd" == *"--port $PORT"* ]]; then
+      echo "[start] StarAgent already running (pid=$pid_from_port)."
+      echo "$pid_from_port" > "$PIDFILE"
+      echo "[start] URLs:"
+      echo "  Health: http://127.0.0.1:${PORT}/health"
+      echo "  OpenAI base: http://127.0.0.1:${PORT}/v1"
+      exit 0
+    fi
+  fi
   echo "[start] ERROR: Port $PORT is already in use." >&2
   lsof -nP -iTCP:"$PORT" -sTCP:LISTEN || true
   exit 1
@@ -116,16 +137,16 @@ if ! python3 -c 'import sys,json; model=sys.argv[1]; data=json.load(sys.stdin); 
   exit 1
 fi
 
-echo "[start] Starting MacAgent (uvicorn)..."
+echo "[start] Starting StarAgent (uvicorn)..."
 export OLLAMA_BASE_URL DEFAULT_MODEL PROXY_API_KEY LOG_LEVEL
-nohup python3 -m uvicorn app.main:app --host "$HOST" --port "$PORT" > "$LOGFILE" 2>&1 &
+nohup "$PYTHON" -m uvicorn app.main:app --host "$HOST" --port "$PORT" > "$LOGFILE" 2>&1 &
 pid=$!
 echo "$pid" > "$PIDFILE"
 
 echo "[start] Waiting for /health..."
 for _ in {1..120}; do
   if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
-    echo "[start] OK: MacAgent started (pid=$pid)."
+    echo "[start] OK: StarAgent started (pid=$pid)."
     echo "[start] URLs:"
     echo "  Health: http://127.0.0.1:${PORT}/health"
     echo "  OpenAI base: http://127.0.0.1:${PORT}/v1"
@@ -135,7 +156,7 @@ for _ in {1..120}; do
   sleep 0.5
 done
 
-echo "[start] ERROR: MacAgent did not become healthy within timeout." >&2
+echo "[start] ERROR: StarAgent did not become healthy within timeout." >&2
 echo "[start] Last log lines:" >&2
 tail -n 80 "$LOGFILE" >&2 || true
 exit 1

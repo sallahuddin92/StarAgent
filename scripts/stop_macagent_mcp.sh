@@ -26,12 +26,11 @@ fi
 
 cmd="$(ps -p "$pid" -o command= || true)"
 if [[ "$cmd" != *"python"* || "$cmd" != *"-m mcp.server"* ]]; then
-  echo "[mcp-stop] Refusing to kill pid=$pid (not macagent-mcp)."
+  echo "[mcp-stop] Refusing to kill pid=$pid (not staragent-mcp)."
   echo "[mcp-stop] cmd: $cmd"
   exit 2
 fi
 
-echo "[mcp-stop] Stopping macagent-mcp pid=$pid"
+echo "[mcp-stop] Stopping staragent-mcp pid=$pid"
 kill "$pid" || true
 echo "[mcp-stop] OK"
-

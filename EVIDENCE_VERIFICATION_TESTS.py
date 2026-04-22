@@ -6,6 +6,7 @@ Each test must produce real evidence (commands, outputs, pass/fail).
 """
 
 import requests
+import os
 import json
 import time
 import subprocess
@@ -18,10 +19,12 @@ import httpx
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configuration
-PROXY_URL = "http://127.0.0.1:8081"
-OLLAMA_URL = "http://127.0.0.1:11434"
-AUTH_HEADER = {"Authorization": "Bearer local-dev-key", "Content-Type": "application/json"}
-DB_PATH = Path("/Users/sallahuddin/Desktop/macagent_proxy_starter/data/memory.db")
+REPO_ROOT = Path(__file__).resolve().parent
+PROXY_URL = os.environ.get("STARAGENT_HTTP_URL") or os.environ.get("MACAGENT_HTTP_URL") or "http://127.0.0.1:8095"
+OLLAMA_URL = os.environ.get("OLLAMA_BASE_URL") or "http://127.0.0.1:11434"
+_API_KEY = os.environ.get("STARAGENT_API_KEY") or os.environ.get("MACAGENT_API_KEY") or os.environ.get("PROXY_API_KEY") or "local-dev-key"
+AUTH_HEADER = {"Authorization": f"Bearer {_API_KEY}", "Content-Type": "application/json"}
+DB_PATH = REPO_ROOT / "data" / "memory.db"
 
 class TestEvidence:
     def __init__(self):
@@ -645,7 +648,7 @@ def main():
     passed, failed, partial = evidence.print_summary()
     
     # Save results
-    results_file = Path("/Users/sallahuddin/Desktop/macagent_proxy_starter/test_results.json")
+    results_file = REPO_ROOT / "test_results.json"
     with open(results_file, "w") as f:
         json.dump({"tests": evidence.results, "summary": {"passed": passed, "failed": failed, "partial": partial}}, f, indent=2)
     

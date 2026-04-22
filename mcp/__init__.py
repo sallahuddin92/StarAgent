@@ -1,2 +1,1 @@
-"""MacAgent MCP server package."""
-
+"""StarAgent MCP server package (legacy compatible: macagent tools)."""
