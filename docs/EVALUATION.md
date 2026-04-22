@@ -21,9 +21,16 @@ The runner is conservative and only writes into `sandbox_test/`.
 ./scripts/eval_staragent.sh
 ```
 
+## Phase 4: Research Mode Eval
+
+Run document research mode end-to-end (requires a running StarAgent server and a local Ollama model):
+
+```bash
+./scripts/eval_research_mode.sh
+```
+
 ## Notes
 
 - Open WebUI is verified by simulating typical helper/meta prompt payloads that previously hijacked routing.
 - Claude MCP verification requires `claude` CLI and an MCP server configured (see `docs/CLAUDE_CODE_MCP_SETUP.md`).
 - API branding toggle can be enabled via `STARAGENT_BRAND_API=true` (see `.env.example`).
-

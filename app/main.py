@@ -12,13 +12,15 @@ import time
 import uuid
 import logging
 import asyncio
+from pathlib import Path
 from typing import Any, Dict, List, Optional, AsyncGenerator, Union
 from datetime import datetime
+import base64
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .version import __version__
@@ -29,6 +31,13 @@ from .models import (
     ChatCompletionStreamResponse,
     MemoryCompactionRequest,
     ProjectInfo,
+    TaskCreateRequest,
+    TaskActionRequest,
+    ResearchRunRequest,
+    RepoAuditRunRequest,
+    IssueTriageRunRequest,
+    WritingRunRequest,
+    PresetRunRequest,
 )
 from .prompting import build_system_prompt, MemoryCompactor
 from .database import get_db, DatabaseManager
@@ -43,6 +52,14 @@ from .approval import ApprovalPolicy
 from .reflection import ReflectionLayer
 from .workspace_state import WorkspaceTracker
 from .routing import determine_execution_route, AGENT_PATH
+from .task_engine import TaskEngine
+from .research_mode import ResearchPipeline
+from .llm_client import OllamaChatClient
+from .repo_audit import RepoAuditPipeline
+from .issue_triage import IssueTriagePipeline
+from .writing_profile import WritingPipeline
+from .presets import PRESETS, PACKS, list_presets, list_preset_packs, default_release_review_output_path
+from .dashboard_ui import render_dashboard_html
 
 # Configuration
 load_dotenv()
@@ -106,6 +123,11 @@ tool_executor: ToolExecutor = ToolExecutor(tool_registry)
 approval_policy: ApprovalPolicy = ApprovalPolicy()
 reflection_layer: ReflectionLayer = ReflectionLayer()
 http_client: Optional[httpx.AsyncClient] = None
+research_pipeline: Optional[ResearchPipeline] = None
+repo_audit_pipeline: Optional[RepoAuditPipeline] = None
+issue_triage_pipeline: Optional[IssueTriagePipeline] = None
+writing_pipeline: Optional[WritingPipeline] = None
+task_engine: Optional[TaskEngine] = None
 
 # Projects storage (in-memory for now; can be extended to DB)
 _projects: Dict[str, ProjectInfo] = {}
@@ -129,6 +151,27 @@ async def startup():
     )
     agent_loop = AgentLoop(planner, executor)
     logger.info("V5 Agent Runtime initialized.")
+
+    # Phase 4: Task engine + research pipeline (additive; does not affect /v1/chat behavior).
+    global research_pipeline, repo_audit_pipeline, issue_triage_pipeline, writing_pipeline, task_engine
+    llm = OllamaChatClient(OLLAMA_BASE_URL, OLLAMA_CHAT_PATH, DEFAULT_MODEL, http_client)
+    research_pipeline = ResearchPipeline(llm)
+    repo_audit_pipeline = RepoAuditPipeline(llm)
+    issue_triage_pipeline = IssueTriagePipeline(llm)
+    writing_pipeline = WritingPipeline(llm)
+    task_engine = TaskEngine(
+        db=db,
+        store=store,
+        planner=planner,
+        executor=executor,
+        workspace=workspace_tracker,
+        approval_policy=approval_policy,
+        research=research_pipeline,
+        repo_audit=repo_audit_pipeline,
+        issue_triage=issue_triage_pipeline,
+        writing=writing_pipeline,
+    )
+    logger.info("Phase 4 Task Engine initialized.")
 
 
 @app.on_event("shutdown")
@@ -177,6 +220,20 @@ async def list_models() -> Dict[str, Any]:
             }
         ],
     }
+
+
+# ============================================================================
+# Lightweight Dashboard (local UI)
+# ============================================================================
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard() -> HTMLResponse:
+    return HTMLResponse(render_dashboard_html())
+
+
+@app.get("/dashboard/", response_class=HTMLResponse)
+async def dashboard_slash() -> HTMLResponse:
+    return HTMLResponse(render_dashboard_html())
 
 
 # ============================================================================
@@ -622,6 +679,777 @@ async def get_budget(
     """Get token budget status for conversation."""
     _validate_api_key(authorization)
     return budget_manager.get_budget_status(conversation_id)
+
+
+# ============================================================================
+# Phase 4: Iterative Task Engine + Document Research Mode
+# ============================================================================
+
+def _task_progress(tr: Dict[str, Any], steps: List[Dict[str, Any]]) -> Dict[str, Any]:
+    completed = [s for s in steps if s.get("status") == "completed"]
+    failed = [s for s in steps if s.get("status") == "failed"]
+    paused = [s for s in steps if s.get("status") == "paused"]
+    running = [s for s in steps if s.get("status") == "running"]
+    pending = [s for s in steps if s.get("status") == "pending"]
+
+    # Determine "current" step: prefer the index pointer, else first non-completed.
+    cur = None
+    idx = int(tr.get("current_step_index") or 0)
+    for s in steps:
+        if int(s.get("step_index") or 0) == idx:
+            cur = s
+            break
+    if cur is None:
+        for s in steps:
+            if s.get("status") != "completed":
+                cur = s
+                break
+    pct = 0.0
+    if steps:
+        pct = round(len(completed) / max(1, len(steps)) * 100.0, 1)
+    return {
+        "counts": {
+            "total": len(steps),
+            "completed": len(completed),
+            "pending": len(pending),
+            "running": len(running),
+            "paused": len(paused),
+            "failed": len(failed),
+        },
+        "percent_complete": pct,
+        "current_step": cur,
+        "last_completed_step": completed[-1] if completed else None,
+    }
+
+def _primary_artifact_name(task_type: Optional[str]) -> Optional[str]:
+    tt = (task_type or "").strip().lower()
+    if tt == "research":
+        return "final_report.md"
+    if tt == "repo_audit":
+        return "audit_report.md"
+    if tt == "issue_triage":
+        return "next_actions.md"
+    if tt == "writing":
+        return "final_output.md"
+    return None
+
+
+def _parse_iso_dt(s: Any) -> Optional[datetime]:
+    if not s:
+        return None
+    if isinstance(s, datetime):
+        return s
+    try:
+        st = str(s)
+        # stored as "...Z" sometimes; datetime.fromisoformat doesn't accept "Z"
+        if st.endswith("Z"):
+            st = st[:-1] + "+00:00"
+        return datetime.fromisoformat(st)
+    except Exception:
+        return None
+
+
+def _task_time_meta(tr: Dict[str, Any]) -> Dict[str, Any]:
+    created = _parse_iso_dt(tr.get("created_at"))
+    updated = _parse_iso_dt(tr.get("updated_at"))
+    now = datetime.utcnow()
+    age_s = (now - created).total_seconds() if created else None
+    duration_s = (updated - created).total_seconds() if (created and updated) else None
+    return {"age_s": age_s, "duration_s": duration_s}
+
+
+def _task_primary_artifact(tr: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    name = _primary_artifact_name(tr.get("task_type"))
+    if not name:
+        return None
+    aj = tr.get("artifacts_json") or {}
+    artifact_dir = Path(str(aj.get("artifact_dir") or (Path(".runtime") / "tasks" / tr.get("task_id", "")))).resolve()
+    p = (artifact_dir / name).resolve()
+    exists = artifact_dir.exists() and p.exists() and p.is_file()
+    out: Dict[str, Any] = {"name": name, "exists": exists}
+    if exists:
+        out["path"] = str(p)
+        out["preview_url"] = f"/v1/tasks/{tr.get('task_id')}/artifacts/{name}"
+    else:
+        out["path"] = str(p)
+    return out
+
+
+def _safe_task_artifact_path(task_id: str, artifact_name: str) -> Path:
+    tr = db.get_task_run(task_id)
+    if not tr:
+        raise HTTPException(status_code=404, detail="Task not found")
+    aj = tr.get("artifacts_json") or {}
+    artifact_dir = Path(str(aj.get("artifact_dir") or (Path(".runtime") / "tasks" / task_id))).resolve()
+    if not artifact_dir.exists() or not artifact_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Artifact directory not found")
+    p = (artifact_dir / artifact_name).resolve()
+    # Prevent path traversal
+    if artifact_dir not in p.parents and artifact_dir != p:
+        raise HTTPException(status_code=400, detail="Invalid artifact path")
+    if not p.exists() or not p.is_file():
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    return p
+
+
+@app.post("/v1/tasks")
+async def create_task(
+    req: TaskCreateRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    if not task_engine:
+        raise HTTPException(status_code=503, detail="Task engine not initialized")
+
+    tr = task_engine.create_task(
+        project_id=req.project_id,
+        conversation_id=req.conversation_id,
+        task_type=req.task_type,
+        user_goal=req.user_goal,
+        definition_of_done=req.definition_of_done,
+        max_steps=req.max_steps,
+        max_retries=req.max_retries,
+        artifacts_json={},
+    )
+    # Record artifact dir for clients.
+    artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
+    db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
+    tr = db.get_task_run(tr["task_id"]) or tr
+
+    if req.run_now:
+        out = await task_engine.run(tr["task_id"])
+        return JSONResponse(content=out.to_dict())
+    return JSONResponse(status_code=201, content={"task": tr, "steps": []})
+
+@app.get("/v1/tasks")
+async def list_tasks(
+    project_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    runs = db.list_task_runs(
+        project_id=project_id,
+        conversation_id=conversation_id,
+        status=status,
+        limit=limit,
+        offset=offset,
+        order="updated_desc",
+    )
+    return JSONResponse(content={"tasks": runs, "limit": limit, "offset": offset})
+
+
+@app.get("/v1/tasks/{task_id}")
+async def get_task_status(
+    task_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    if not task_engine:
+        raise HTTPException(status_code=503, detail="Task engine not initialized")
+    out = task_engine.get_task(task_id)
+    if not out:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return JSONResponse(content=out.to_dict())
+
+@app.get("/v1/tasks/{task_id}/inspect")
+async def inspect_task(
+    task_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    tr = db.get_task_run(task_id)
+    if not tr:
+        raise HTTPException(status_code=404, detail="Task not found")
+    steps = db.list_task_steps(task_id)
+    prog = _task_progress(tr, steps)
+    return JSONResponse(
+        content={
+            "task": tr,
+            "progress": prog,
+            "time": _task_time_meta(tr),
+            "primary_artifact": _task_primary_artifact(tr),
+            "steps": steps,
+        }
+    )
+
+
+@app.get("/v1/tasks/{task_id}/summary")
+async def task_summary(
+    task_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    tr = db.get_task_run(task_id)
+    if not tr:
+        raise HTTPException(status_code=404, detail="Task not found")
+    steps = db.list_task_steps(task_id)
+    prog = _task_progress(tr, steps)
+
+    final = tr.get("final_summary")
+    if not final and prog.get("last_completed_step"):
+        final = (prog["last_completed_step"].get("output_summary") or "")[:1200]
+    out = {
+        "task": {
+            "task_id": tr.get("task_id"),
+            "project_id": tr.get("project_id"),
+            "conversation_id": tr.get("conversation_id"),
+            "task_type": tr.get("task_type"),
+            "status": tr.get("status"),
+            "current_step_index": tr.get("current_step_index"),
+            "retry_count": tr.get("retry_count"),
+            "final_verdict": tr.get("final_verdict"),
+            "final_summary": final,
+            "artifacts_json": tr.get("artifacts_json") or {},
+            "created_at": tr.get("created_at"),
+            "updated_at": tr.get("updated_at"),
+        },
+        "progress": prog,
+        "time": _task_time_meta(tr),
+        "primary_artifact": _task_primary_artifact(tr),
+    }
+    return JSONResponse(content=out)
+
+
+@app.get("/v1/tasks/{task_id}/logs")
+async def task_logs(
+    task_id: str,
+    tail_steps: int = 50,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    tr = db.get_task_run(task_id)
+    if not tr:
+        raise HTTPException(status_code=404, detail="Task not found")
+    steps = db.list_task_steps(task_id)
+    tail_steps = max(1, min(int(tail_steps or 50), 300))
+    steps = steps[-tail_steps:]
+    logs = []
+    for s in steps:
+        logs.append(
+            {
+                "step_index": s.get("step_index"),
+                "step_type": s.get("step_type"),
+                "status": s.get("status"),
+                "attempt_count": s.get("attempt_count"),
+                "instruction": (s.get("instruction") or "")[:400],
+                "output_summary": s.get("output_summary"),
+                "verifier_result": s.get("verifier_result"),
+                "artifact_path": s.get("artifact_path"),
+                "updated_at": s.get("updated_at"),
+            }
+        )
+    return JSONResponse(content={"task_id": task_id, "status": tr.get("status"), "logs": logs})
+
+
+@app.get("/v1/tasks/{task_id}/artifacts")
+async def get_task_artifacts(
+    task_id: str,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    tr = db.get_task_run(task_id)
+    if not tr:
+        raise HTTPException(status_code=404, detail="Task not found")
+    aj = tr.get("artifacts_json") or {}
+    artifact_dir = str(aj.get("artifact_dir") or (Path(".runtime") / "tasks" / task_id))
+    d = Path(artifact_dir)
+    primary_name = _primary_artifact_name(tr.get("task_type"))
+    files: List[Dict[str, Any]] = []
+    if d.exists() and d.is_dir():
+        for p in sorted(d.glob("*")):
+            if not p.is_file():
+                continue
+            try:
+                st = p.stat()
+                ext = p.suffix.lower()
+                ftype = "json" if ext == ".json" else ("markdown" if ext in {".md", ".markdown"} else ("text" if ext in {".txt", ".log", ".rst"} else "other"))
+                files.append(
+                    {
+                        "name": p.name,
+                        "type": ftype,
+                        "size_bytes": int(st.st_size),
+                        "mtime": int(st.st_mtime),
+                        "is_primary": bool(primary_name and p.name == primary_name),
+                        "preview_url": f"/v1/tasks/{task_id}/artifacts/{p.name}",
+                    }
+                )
+            except Exception:
+                files.append({"name": p.name, "is_primary": bool(primary_name and p.name == primary_name)})
+
+    primary = _task_primary_artifact(tr)
+    return JSONResponse(content={"task_id": task_id, "artifact_dir": artifact_dir, "primary_artifact": primary, "files": files})
+
+
+@app.get("/v1/tasks/{task_id}/artifacts/{artifact_name}")
+async def preview_task_artifact(
+    task_id: str,
+    artifact_name: str,
+    format: str = "text",  # text|json
+    max_bytes: int = 50_000,
+    tail_lines: int = 200,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    p = _safe_task_artifact_path(task_id, artifact_name)
+
+    # Important: do not treat 0 as "unset" for these query params.
+    max_bytes = max(512, min(int(max_bytes), 500_000))
+    tail_lines = max(0, min(int(tail_lines), 4000))
+    raw = p.read_bytes()
+    truncated = False
+    if len(raw) > max_bytes:
+        raw = raw[-max_bytes:]
+        truncated = True
+
+    ext = p.suffix.lower()
+    content_text = ""
+    try:
+        content_text = raw.decode("utf-8")
+    except Exception:
+        content_text = raw.decode("latin-1", errors="replace")
+
+    is_json = (format == "json") or (ext == ".json")
+    if is_json:
+        try:
+            obj = json.loads(content_text)
+            content_text = json.dumps(obj, ensure_ascii=False, indent=2)
+        except Exception:
+            # Leave as text if not valid JSON
+            pass
+
+    # Tail after optional JSON pretty-printing (tailing raw JSON first often breaks parsing).
+    if tail_lines > 0:
+        lines = content_text.splitlines()
+        if len(lines) > tail_lines:
+            content_text = "\n".join(lines[-tail_lines:])
+            truncated = True
+
+    return JSONResponse(
+        content={
+            "task_id": task_id,
+            "artifact_name": artifact_name,
+            "artifact_path": str(p),
+            "format": format,
+            "truncated": truncated,
+            "content": content_text,
+        }
+    )
+
+
+@app.post("/v1/tasks/{task_id}/continue")
+async def continue_task_run(
+    task_id: str,
+    req: TaskActionRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    if not task_engine:
+        raise HTTPException(status_code=503, detail="Task engine not initialized")
+
+    if req.action == "approve":
+        out = await task_engine.approve(task_id)
+        return JSONResponse(content=out.to_dict())
+    if req.action == "reject":
+        out = await task_engine.reject(task_id, reason=req.reason or "rejected")
+        return JSONResponse(content=out.to_dict())
+
+    out = await task_engine.run(task_id, max_step_advances=req.max_step_advances, max_duration_s=req.max_duration_s)
+    return JSONResponse(content=out.to_dict())
+
+
+@app.post("/v1/research/run")
+async def research_run(
+    req: ResearchRunRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    if not task_engine:
+        raise HTTPException(status_code=503, detail="Task engine not initialized")
+
+    tr = task_engine.create_task(
+        project_id=req.project_id,
+        conversation_id=req.conversation_id,
+        task_type="research",
+        user_goal=req.question or f"Research folder: {req.path}",
+        definition_of_done="Artifacts written: file_index.json, chunk_summaries.json, file_summaries.md, research_brief.md, open_questions.md, final_report.md",
+        max_steps=req.max_steps,
+        max_retries=req.max_retries,
+        artifacts_json={
+            "root_path": req.path,
+            "files": req.files,
+            "question": req.question,
+            "mode": req.mode,
+        },
+    )
+    # Record artifact dir for clients.
+    artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
+    db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
+    tr = db.get_task_run(tr["task_id"]) or tr
+    if req.run_now:
+        out = await task_engine.run(tr["task_id"], max_step_advances=3, max_duration_s=25.0)
+        return JSONResponse(content=out.to_dict())
+    return JSONResponse(status_code=201, content={"task": tr, "steps": []})
+
+
+@app.post("/v1/repo_audit/run")
+async def repo_audit_run(
+    req: RepoAuditRunRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    if not task_engine:
+        raise HTTPException(status_code=503, detail="Task engine not initialized")
+
+    tr = task_engine.create_task(
+        project_id=req.project_id,
+        conversation_id=req.conversation_id,
+        task_type="repo_audit",
+        user_goal=req.question or f"Repo audit: {req.path}",
+        definition_of_done="Artifacts written: file_index.json, entry_points.md, architecture_map.md, risk_notes.md, open_questions.md, audit_report.md",
+        max_steps=req.max_steps,
+        max_retries=req.max_retries,
+        artifacts_json={"root_path": req.path, "question": req.question},
+    )
+    artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
+    db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
+    tr = db.get_task_run(tr["task_id"]) or tr
+    if req.run_now:
+        out = await task_engine.run(tr["task_id"], max_step_advances=3, max_duration_s=25.0)
+        return JSONResponse(content=out.to_dict())
+    return JSONResponse(status_code=201, content={"task": tr, "steps": []})
+
+
+@app.post("/v1/issue_triage/run")
+async def issue_triage_run(
+    req: IssueTriageRunRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    if not task_engine:
+        raise HTTPException(status_code=503, detail="Task engine not initialized")
+
+    tr = task_engine.create_task(
+        project_id=req.project_id,
+        conversation_id=req.conversation_id,
+        task_type="issue_triage",
+        user_goal=req.issue,
+        definition_of_done="Artifacts written: issue_summary.md, evidence_table.json, likely_causes.md, reproduction_steps.md, next_actions.md",
+        max_steps=req.max_steps,
+        max_retries=req.max_retries,
+        artifacts_json={
+            "root_path": req.path,
+            "issue": req.issue,
+            "files": req.files,
+            "logs": req.logs,
+        },
+    )
+    artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
+    db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
+    tr = db.get_task_run(tr["task_id"]) or tr
+    if req.run_now:
+        out = await task_engine.run(tr["task_id"], max_step_advances=3, max_duration_s=25.0)
+        return JSONResponse(content=out.to_dict())
+    return JSONResponse(status_code=201, content={"task": tr, "steps": []})
+
+
+@app.post("/v1/write/run")
+async def writing_run(
+    req: WritingRunRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    if not task_engine:
+        raise HTTPException(status_code=503, detail="Task engine not initialized")
+
+    tr = task_engine.create_task(
+        project_id=req.project_id,
+        conversation_id=req.conversation_id,
+        task_type="writing",
+        user_goal=req.goal,
+        definition_of_done="Artifacts written: source_index.json, outline.md, draft.md, final_output.md",
+        max_steps=req.max_steps,
+        max_retries=req.max_retries,
+        artifacts_json={"root_path": req.path, "goal": req.goal, "files": req.files},
+    )
+    artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
+    db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
+    tr = db.get_task_run(tr["task_id"]) or tr
+    if req.run_now:
+        out = await task_engine.run(tr["task_id"], max_step_advances=3, max_duration_s=25.0)
+        return JSONResponse(content=out.to_dict())
+    return JSONResponse(status_code=201, content={"task": tr, "steps": []})
+
+
+# ============================================================================
+# Preset Workflows (operator-friendly entrypoints)
+# ============================================================================
+
+
+@app.get("/v1/presets")
+async def presets_list(
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    # Additive response: existing clients rely on {"presets":[...]}.
+    return JSONResponse(content={"presets": list_presets(), "packs": list_preset_packs()})
+
+
+@app.get("/v1/presets/packs")
+async def preset_packs_list(
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    return JSONResponse(content={"packs": list_preset_packs()})
+
+
+async def _run_preset_internal(preset_name: str, req: PresetRunRequest) -> Dict[str, Any]:
+    """
+    Internal helper used by both /v1/presets/{preset}/run and preset packs.
+    Returns a JSON-serializable dict.
+    """
+    if not task_engine:
+        raise HTTPException(status_code=503, detail="Task engine not initialized")
+
+    name = (preset_name or "").strip()
+    spec = PRESETS.get(name)
+    if not spec:
+        raise HTTPException(status_code=404, detail="Unknown preset")
+
+    max_steps = int(req.max_steps or spec.default_max_steps)
+    max_retries = int(req.max_retries or spec.default_max_retries)
+
+    if name in ("quick_repo_audit", "deep_repo_audit"):
+        path = _require(req, "path")
+        question = req.question
+        if name == "deep_repo_audit" and question:
+            question = f"{question}\n\n(Deep audit requested: emphasize architecture, risks, and unknowns.)"
+        tr = task_engine.create_task(
+            project_id=req.project_id,
+            conversation_id=req.conversation_id,
+            task_type="repo_audit",
+            user_goal=question or f"Repo audit: {path}",
+            definition_of_done="Artifacts written: file_index.json, entry_points.md, architecture_map.md, risk_notes.md, open_questions.md, audit_report.md",
+            max_steps=max_steps,
+            max_retries=max_retries,
+            artifacts_json={"root_path": path, "question": question},
+        )
+        artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
+        db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
+        tr = db.get_task_run(tr["task_id"]) or tr
+        if req.run_now:
+            out = await task_engine.run(tr["task_id"], max_step_advances=3, max_duration_s=25.0)
+            return {"preset": spec.__dict__, **out.to_dict()}
+        return {"preset": spec.__dict__, "task": tr, "steps": []}
+
+    if name == "bug_triage":
+        path = _require(req, "path")
+        issue = _require(req, "issue")
+        tr = task_engine.create_task(
+            project_id=req.project_id,
+            conversation_id=req.conversation_id,
+            task_type="issue_triage",
+            user_goal=issue,
+            definition_of_done="Artifacts written: issue_summary.md, evidence_table.json, likely_causes.md, reproduction_steps.md, next_actions.md",
+            max_steps=max_steps,
+            max_retries=max_retries,
+            artifacts_json={"root_path": path, "issue": issue, "files": req.files, "logs": req.logs},
+        )
+        artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
+        db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
+        tr = db.get_task_run(tr["task_id"]) or tr
+        if req.run_now:
+            out = await task_engine.run(tr["task_id"], max_step_advances=3, max_duration_s=25.0)
+            return {"preset": spec.__dict__, **out.to_dict()}
+        return {"preset": spec.__dict__, "task": tr, "steps": []}
+
+    if name == "docs_research":
+        path = _require(req, "path")
+        mode = req.mode or "research"
+        question = req.question
+        tr = task_engine.create_task(
+            project_id=req.project_id,
+            conversation_id=req.conversation_id,
+            task_type="research",
+            user_goal=question or f"Research folder: {path}",
+            definition_of_done="Artifacts written: file_index.json, chunk_summaries.json, file_summaries.md, research_brief.md, open_questions.md, final_report.md",
+            max_steps=max_steps,
+            max_retries=max_retries,
+            artifacts_json={"root_path": path, "files": req.files, "question": question, "mode": mode},
+        )
+        artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
+        db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
+        tr = db.get_task_run(tr["task_id"]) or tr
+        if req.run_now:
+            out = await task_engine.run(tr["task_id"], max_step_advances=3, max_duration_s=25.0)
+            return {"preset": spec.__dict__, **out.to_dict()}
+        return {"preset": spec.__dict__, "task": tr, "steps": []}
+
+    if name == "structured_memo":
+        path = _require(req, "path")
+        goal = req.goal or "Write a short structured memo with clear section headings and bullet points. Do not include TO/FROM/DATE/SUBJECT headers or bracket placeholders."
+        tr = task_engine.create_task(
+            project_id=req.project_id,
+            conversation_id=req.conversation_id,
+            task_type="writing",
+            user_goal=goal,
+            definition_of_done="Artifacts written: source_index.json, outline.md, draft.md, final_output.md",
+            max_steps=max_steps,
+            max_retries=max_retries,
+            artifacts_json={"root_path": path, "goal": goal, "files": req.files},
+        )
+        artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
+        db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
+        tr = db.get_task_run(tr["task_id"]) or tr
+        if req.run_now:
+            out = await task_engine.run(tr["task_id"], max_step_advances=3, max_duration_s=25.0)
+            return {"preset": spec.__dict__, **out.to_dict()}
+        return {"preset": spec.__dict__, "task": tr, "steps": []}
+
+    if name == "release_review":
+        path = req.path or "."
+        out_path = req.output_path or default_release_review_output_path()
+        question = req.goal or (
+            "Perform a release readiness review of this repository.\n"
+            f"- Scope: {path}\n"
+            "- Identify entry points and request flow.\n"
+            "- Summarize operational risks and unknowns.\n"
+            "- Provide a minimal validation checklist (tests/lint) where applicable.\n"
+            "Keep the report grounded in the repo contents and operator-friendly."
+        )
+        tr = task_engine.create_task(
+            project_id=req.project_id,
+            conversation_id=req.conversation_id,
+            task_type="repo_audit",
+            user_goal=question,
+            definition_of_done=f"Repo audit completed and export queued to {out_path} (approval-gated write).",
+            max_steps=max_steps,
+            max_retries=max_retries,
+            artifacts_json={"preset": "release_review", "root_path": path, "question": question, "output_path": out_path},
+        )
+        artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
+        db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
+        tr = db.get_task_run(tr["task_id"]) or tr
+        if req.run_now:
+            out = await task_engine.run(tr["task_id"], max_step_advances=6, max_duration_s=50.0)
+            return {"preset": spec.__dict__, **out.to_dict()}
+        return {"preset": spec.__dict__, "task": tr, "steps": []}
+
+    raise HTTPException(status_code=500, detail="Preset handler missing")
+
+
+def _require(req: PresetRunRequest, field: str) -> str:
+    v = getattr(req, field, None)
+    if not v or not str(v).strip():
+        raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
+    return str(v)
+
+
+@app.post("/v1/presets/{preset_name}/run")
+async def presets_run(
+    preset_name: str,
+    req: PresetRunRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    out = await _run_preset_internal(preset_name, req)
+    # If the caller requested creation-only, keep 201 for consistency.
+    if not req.run_now:
+        return JSONResponse(status_code=201, content=out)
+    return JSONResponse(content=out)
+
+
+@app.post("/v1/presets/packs/{pack_name}/run")
+async def preset_packs_run(
+    pack_name: str,
+    req: PresetRunRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    if not task_engine:
+        raise HTTPException(status_code=503, detail="Task engine not initialized")
+
+    name = (pack_name or "").strip()
+    pack = PACKS.get(name)
+    if not pack:
+        raise HTTPException(status_code=404, detail="Unknown preset pack")
+
+    root_path = req.path or "."
+    runs: List[Dict[str, Any]] = []
+    prev_artifact_dir: Optional[str] = None
+
+    # Bounded pack orchestration: for each preset in the pack, attempt to run
+    # enough for primary artifacts to exist, but do not allow unbounded looping.
+    for preset in pack.presets:
+        derived = req.model_copy(deep=True)
+        if preset in ("structured_memo",) and prev_artifact_dir:
+            derived.path = prev_artifact_dir
+        else:
+            derived.path = root_path
+
+        if preset == "structured_memo" and not (derived.goal or "").strip():
+            derived.goal = (
+                "Write a short structured memo with clear section headings and bullet points.\n"
+                "Ground the memo strictly in the provided sources/artifacts.\n"
+                "- Do not mention code paths or components that are not explicitly present in the sources.\n"
+                "- If information is missing, say 'Unknown' rather than guessing.\n"
+                "- Do not include TO/FROM/DATE/SUBJECT headers or bracket placeholders."
+            )
+
+        # For bug triage, prefer req.issue if present; otherwise surface a clear error.
+        if preset == "bug_triage":
+            derived.issue = derived.issue or req.issue
+
+        out = await _run_preset_internal(preset, derived)
+        runs.append(out)
+
+        task = out.get("task") or {}
+        task_id = task.get("task_id")
+        # Tag tasks created via pack runs so dashboards/clients can filter by pack
+        # without any new persistence surface. This is additive metadata only.
+        if task_id:
+            tr_live = db.get_task_run(task_id)
+            if tr_live:
+                aj = tr_live.get("artifacts_json") or {}
+                if aj.get("pack_name") != pack.name:
+                    aj = {**aj, "pack_name": pack.name, "pack_preset": preset}
+                    db.update_task_run(task_id, {"artifacts_json": aj})
+                    # Keep response in sync for clients that rely on the immediate payload.
+                    tr_live = db.get_task_run(task_id) or tr_live
+                    task = tr_live
+                    runs[-1]["task"] = tr_live
+
+        artifacts = (task.get("artifacts_json") or {})
+        prev_artifact_dir = artifacts.get("artifact_dir") or prev_artifact_dir
+
+        # Stop early on approval/continuation signals so operator can proceed safely.
+        if out.get("action_required"):
+            return JSONResponse(
+                content={
+                    "pack": pack.__dict__,
+                    "runs": runs,
+                    "action_required": out.get("action_required"),
+                    "note": "pack_paused_for_action",
+                }
+            )
+
+        # If we need additional work before the next preset (e.g., memo wants the audit report),
+        # do a couple bounded continues.
+        if preset in ("quick_repo_audit", "deep_repo_audit", "docs_research") and task.get("status") == "partial":
+            task_id = task.get("task_id")
+            if task_id:
+                for _ in range(2):
+                    cont = await task_engine.run(task_id, max_step_advances=6, max_duration_s=50.0)
+                    out2 = {"preset": out.get("preset"), **cont.to_dict()}
+                    runs[-1] = out2
+                    task = out2.get("task") or task
+                    if (task.get("status") or "") in ("completed", "paused", "failed"):
+                        break
+
+    return JSONResponse(content={"pack": pack.__dict__, "runs": runs})
 
 
 # ============================================================================

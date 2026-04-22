@@ -43,11 +43,13 @@ Alternatively, you can always use the repo-local wrapper:
 ./scripts/staragent ask \"Reply with exactly OK\"
 ```
 
-Note: CLI flags like `--json` must appear before the subcommand:
+Note: global CLI flags like `--json` must appear before the subcommand:
 
 ```bash
 staragent --json ask "Reply with exactly OK"
 ```
+
+For `staragent task ...` subcommands, task-specific `--json` flags are supported after the subcommand (for example `staragent task list --json`).
 
 ## Environment Variables
 
@@ -70,3 +72,36 @@ The CLI stores the last used `project_id` and `conversation_id` so that:
 State file:
 - `~/.staragent/context.json` (override with `STARAGENT_CLI_STATE_DIR`)
 - Legacy compatibility: if `~/.staragent/context.json` does not exist but `~/.macagent/context.json` does, the CLI will use the legacy file.
+
+## Phase 4: Tasks + Research Mode
+
+Iterative task engine:
+
+```bash
+staragent task create "Inspect the app folder and identify the main API entry file."
+staragent task status
+staragent task continue
+```
+
+Task observability (operator-friendly):
+
+```bash
+staragent task list --limit 10
+staragent task inspect <task_id>
+staragent task summary <task_id>
+staragent task logs <task_id> --tail 20
+staragent task artifacts <task_id>
+staragent task artifact <task_id> final_report.md
+staragent task artifact <task_id> file_index.json --format json
+```
+
+Document research mode:
+
+```bash
+staragent research run --path docs --question "What is this repo and how do I use it?"
+staragent research status
+```
+
+Notes:
+
+- The CLI remembers the most recent `task_id` as `last_task_id` in the same context file, so `staragent task status` and `staragent task continue` work without retyping the id.

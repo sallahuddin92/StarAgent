@@ -28,6 +28,10 @@ If this is a fresh checkout, run bootstrap first:
 
 - Health: `http://127.0.0.1:${PORT:-8095}/health`
 - OpenAI-compatible base: `http://127.0.0.1:${PORT:-8095}/v1`
+- Dashboard (local UI): `http://127.0.0.1:${PORT:-8095}/dashboard`
+
+If you start with `HOST=0.0.0.0` (for containers/LAN access) and `127.0.0.1` is not reachable on your machine,
+use your LAN IP instead (example: `http://192.168.x.y:${PORT:-8095}/dashboard`).
 
 ## Configuration
 

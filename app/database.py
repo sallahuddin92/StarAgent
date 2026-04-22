@@ -107,6 +107,65 @@ class ArchiveTurn(Base):
     )
 
 
+class TaskRun(Base):
+    """
+    Durable iterative task execution state.
+
+    Generic enough to represent both iterative agent tasks and document research runs.
+    """
+    __tablename__ = "task_runs"
+
+    task_id = Column(String, primary_key=True)
+    project_id = Column(String, nullable=False, index=True)
+    conversation_id = Column(String, nullable=False, index=True)
+    task_type = Column(String, nullable=False, index=True)  # e.g. "agent", "research"
+    user_goal = Column(Text, nullable=False)
+    definition_of_done = Column(Text, nullable=True)
+    status = Column(String, nullable=False, default="pending")  # pending, running, paused, completed, failed, partial
+    current_step_index = Column(Integer, default=0)
+    max_steps = Column(Integer, default=25)
+    max_retries = Column(Integer, default=2)
+    retry_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    final_summary = Column(Text, nullable=True)
+    final_verdict = Column(String, nullable=True)
+    artifacts_json = Column(Text, default="{}")  # JSON dict with artifact paths/metadata
+
+    steps = relationship("TaskStep", back_populates="task_run", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("idx_task_runs_scope", "project_id", "conversation_id", "created_at"),
+        Index("idx_task_runs_status", "status"),
+    )
+
+
+class TaskStep(Base):
+    """A single step within a task run."""
+    __tablename__ = "task_steps"
+
+    step_id = Column(String, primary_key=True)
+    task_id = Column(String, ForeignKey("task_runs.task_id"), nullable=False, index=True)
+    step_index = Column(Integer, nullable=False, index=True)
+    step_type = Column(String, nullable=False, default="generic")  # e.g. "tool", "research_file", "synthesis"
+    instruction = Column(Text, nullable=False)
+    status = Column(String, nullable=False, default="pending")  # pending, running, paused, completed, failed
+    attempt_count = Column(Integer, default=0)
+    output_summary = Column(Text, nullable=True)
+    verifier_result = Column(Text, nullable=True)  # JSON or text summary of verification outcome
+    artifact_path = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    task_run = relationship("TaskRun", back_populates="steps")
+
+    __table_args__ = (
+        Index("idx_task_steps_task_index", "task_id", "step_index"),
+        Index("idx_task_steps_status", "task_id", "status"),
+    )
+
+
 class DatabaseManager:
     """Manages SQLite database operations for conversation memory."""
     
@@ -308,6 +367,221 @@ class DatabaseManager:
                 "pending_history": json.loads(conv.pending_history) if getattr(conv, "pending_history", None) else None,
                 "pending_goal": getattr(conv, "pending_goal", None),
             }
+        finally:
+            session.close()
+
+    # =========================================================================
+    # Task Runs / Steps (Iterative Task Engine)
+    # =========================================================================
+
+    def create_task_run(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """Create and persist a new TaskRun."""
+        import uuid
+        session = self.get_session()
+        try:
+            task_id = task.get("task_id") or str(uuid.uuid4())
+            tr = TaskRun(
+                task_id=task_id,
+                project_id=task["project_id"],
+                conversation_id=task["conversation_id"],
+                task_type=task.get("task_type", "agent"),
+                user_goal=task["user_goal"],
+                definition_of_done=task.get("definition_of_done"),
+                status=task.get("status", "pending"),
+                current_step_index=int(task.get("current_step_index", 0)),
+                max_steps=int(task.get("max_steps", 25)),
+                max_retries=int(task.get("max_retries", 2)),
+                retry_count=int(task.get("retry_count", 0)),
+                final_summary=task.get("final_summary"),
+                final_verdict=task.get("final_verdict"),
+                artifacts_json=json.dumps(task.get("artifacts_json") or {}),
+            )
+            session.add(tr)
+            session.commit()
+            out = self.get_task_run(task_id)
+            return out or {}
+        finally:
+            session.close()
+
+    def get_task_run(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch a task run and normalize to a dict."""
+        session = self.get_session()
+        try:
+            tr = session.query(TaskRun).filter_by(task_id=task_id).first()
+            if not tr:
+                return None
+            _ = tr.task_id
+            return {
+                "task_id": tr.task_id,
+                "project_id": tr.project_id,
+                "conversation_id": tr.conversation_id,
+                "task_type": tr.task_type,
+                "user_goal": tr.user_goal,
+                "definition_of_done": tr.definition_of_done,
+                "status": tr.status,
+                "current_step_index": tr.current_step_index,
+                "max_steps": tr.max_steps,
+                "max_retries": tr.max_retries,
+                "retry_count": tr.retry_count,
+                "created_at": tr.created_at.isoformat() if tr.created_at else None,
+                "updated_at": tr.updated_at.isoformat() if tr.updated_at else None,
+                "final_summary": tr.final_summary,
+                "final_verdict": tr.final_verdict,
+                "artifacts_json": json.loads(tr.artifacts_json or "{}"),
+            }
+        finally:
+            session.close()
+
+    def update_task_run(self, task_id: str, patch: Dict[str, Any]) -> None:
+        """Update a task run with a partial patch."""
+        session = self.get_session()
+        try:
+            tr = session.query(TaskRun).filter_by(task_id=task_id).first()
+            if not tr:
+                return
+            for k, v in patch.items():
+                if k == "artifacts_json" and isinstance(v, (dict, list)):
+                    setattr(tr, k, json.dumps(v))
+                elif hasattr(tr, k):
+                    setattr(tr, k, v)
+            tr.updated_at = datetime.utcnow()
+            session.add(tr)
+            session.commit()
+        finally:
+            session.close()
+
+    def list_task_steps(self, task_id: str) -> List[Dict[str, Any]]:
+        """List steps for a task in index order."""
+        session = self.get_session()
+        try:
+            steps = (
+                session.query(TaskStep)
+                .filter_by(task_id=task_id)
+                .order_by(TaskStep.step_index.asc())
+                .all()
+            )
+            out: List[Dict[str, Any]] = []
+            for s in steps:
+                out.append(
+                    {
+                        "step_id": s.step_id,
+                        "task_id": s.task_id,
+                        "step_index": s.step_index,
+                        "step_type": s.step_type,
+                        "instruction": s.instruction,
+                        "status": s.status,
+                        "attempt_count": s.attempt_count,
+                        "output_summary": s.output_summary,
+                        "verifier_result": s.verifier_result,
+                        "artifact_path": s.artifact_path,
+                        "created_at": s.created_at.isoformat() if s.created_at else None,
+                        "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+                    }
+                )
+            return out
+        finally:
+            session.close()
+
+    def create_task_steps(self, task_id: str, steps: List[Dict[str, Any]]) -> None:
+        """Bulk insert steps for a task."""
+        import uuid
+        session = self.get_session()
+        try:
+            for st in steps:
+                session.add(
+                    TaskStep(
+                        step_id=st.get("step_id") or str(uuid.uuid4()),
+                        task_id=task_id,
+                        step_index=int(st["step_index"]),
+                        step_type=st.get("step_type", "generic"),
+                        instruction=st["instruction"],
+                        status=st.get("status", "pending"),
+                        attempt_count=int(st.get("attempt_count", 0)),
+                        output_summary=st.get("output_summary"),
+                        verifier_result=st.get("verifier_result"),
+                        artifact_path=st.get("artifact_path"),
+                    )
+                )
+            session.commit()
+        finally:
+            session.close()
+
+    def update_task_step(self, step_id: str, patch: Dict[str, Any]) -> None:
+        """Update a task step with a partial patch."""
+        session = self.get_session()
+        try:
+            st = session.query(TaskStep).filter_by(step_id=step_id).first()
+            if not st:
+                return
+            for k, v in patch.items():
+                if hasattr(st, k):
+                    setattr(st, k, v)
+            st.updated_at = datetime.utcnow()
+            session.add(st)
+            session.commit()
+        finally:
+            session.close()
+
+    def list_task_runs(
+        self,
+        *,
+        project_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+        order: str = "updated_desc",
+    ) -> List[Dict[str, Any]]:
+        """
+        List task runs with optional scoping filters.
+
+        This is used for operator observability (CLI/API) and must remain
+        lightweight (no joins to steps).
+        """
+        session = self.get_session()
+        try:
+            q = session.query(TaskRun)
+            if project_id:
+                q = q.filter(TaskRun.project_id == project_id)
+            if conversation_id:
+                q = q.filter(TaskRun.conversation_id == conversation_id)
+            if status:
+                q = q.filter(TaskRun.status == status)
+
+            if order == "created_asc":
+                q = q.order_by(TaskRun.created_at.asc())
+            elif order == "created_desc":
+                q = q.order_by(TaskRun.created_at.desc())
+            elif order == "updated_asc":
+                q = q.order_by(TaskRun.updated_at.asc())
+            else:
+                q = q.order_by(TaskRun.updated_at.desc())
+
+            q = q.offset(max(0, int(offset or 0))).limit(max(1, min(int(limit or 50), 500)))
+
+            out: List[Dict[str, Any]] = []
+            for tr in q.all():
+                out.append(
+                    {
+                        "task_id": tr.task_id,
+                        "project_id": tr.project_id,
+                        "conversation_id": tr.conversation_id,
+                        "task_type": tr.task_type,
+                        "user_goal": tr.user_goal,
+                        "definition_of_done": tr.definition_of_done,
+                        "status": tr.status,
+                        "current_step_index": tr.current_step_index,
+                        "max_steps": tr.max_steps,
+                        "max_retries": tr.max_retries,
+                        "retry_count": tr.retry_count,
+                        "created_at": tr.created_at.isoformat() if tr.created_at else None,
+                        "updated_at": tr.updated_at.isoformat() if tr.updated_at else None,
+                        "final_summary": tr.final_summary,
+                        "final_verdict": tr.final_verdict,
+                        "artifacts_json": json.loads(tr.artifacts_json or "{}"),
+                    }
+                )
+            return out
         finally:
             session.close()
     

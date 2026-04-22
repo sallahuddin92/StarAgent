@@ -139,6 +139,16 @@ fi
 
 echo "[start] Starting StarAgent (uvicorn)..."
 export OLLAMA_BASE_URL DEFAULT_MODEL PROXY_API_KEY LOG_LEVEL
+
+if [[ "${STARAGENT_FOREGROUND:-0}" == "1" ]]; then
+  echo "[start] Foreground mode enabled (STARAGENT_FOREGROUND=1)."
+  echo "[start] URLs:"
+  echo "  Health: http://127.0.0.1:${PORT}/health"
+  echo "  OpenAI base: http://127.0.0.1:${PORT}/v1"
+  echo "  Dashboard: http://127.0.0.1:${PORT}/dashboard"
+  exec "$PYTHON" -m uvicorn app.main:app --host "$HOST" --port "$PORT"
+fi
+
 nohup "$PYTHON" -m uvicorn app.main:app --host "$HOST" --port "$PORT" > "$LOGFILE" 2>&1 &
 pid=$!
 echo "$pid" > "$PIDFILE"

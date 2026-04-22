@@ -14,6 +14,7 @@ StarAgent sits between your clients and Ollama and provides:
 - approval-gated writes (no silent filesystem writes)
 - continuation and resume (`yes` / `continue`)
 - verification and rollback flows
+- a lightweight local dashboard for task browsing, artifacts, logs, and approvals
 
 ## Surfaces
 
@@ -23,6 +24,7 @@ StarAgent sits between your clients and Ollama and provides:
 | CLI | `staragent …` | terminal workflows |
 | Open WebUI | point WebUI to StarAgent | chat UI + approvals |
 | MCP server | `staragent-mcp` | Claude Code / Codex tool calls |
+| Dashboard | `http://127.0.0.1:8095/dashboard` | visual ops: tasks, artifacts, approvals |
 
 ## Architecture
 
@@ -31,16 +33,44 @@ flowchart LR
   U["Developer"] -->|CLI| CLI["staragent (CLI)"]
   U -->|Open WebUI| WEBUI["Open WebUI"]
   U -->|Claude Code / Codex| MCPCLIENT["MCP-capable client"]
+  U -->|Dashboard| DASH["Dashboard (/dashboard)"]
 
   CLI --> API["StarAgent FastAPI (/v1)"]
   WEBUI --> API
   MCPCLIENT --> MCP["staragent-mcp (stdio)"]
   MCP --> API
+  DASH --> API
 
   API --> MEM["SQLite Memory + Pending State"]
   API --> EXEC["Planner / Executor\n(agent path)"]
   EXEC --> TOOLS["Tools (repo read, sandbox write w/ approval,\nverification, rollback)"]
   API --> OLLAMA["Ollama (gemma4:e2b)"]
+```
+
+## 5-Minute Demo
+
+Prereqs: Ollama running with `gemma4:e2b` installed.
+
+```bash
+./scripts/bootstrap_staragent.sh
+./scripts/start_staragent.sh
+./scripts/smoke_test_staragent.sh
+open http://127.0.0.1:8095/dashboard
+```
+
+Flagship flows (CLI):
+
+```bash
+# 1) Repo onboarding (read-only)
+./scripts/staragent --project demo --conversation onboard-1 preset pack-run repo_onboarding --path .
+
+# 2) Docs digest (read-only)
+./scripts/staragent --project demo --conversation docs-1 preset pack-run docs_digest --path docs --question "Summarize how to operate StarAgent."
+
+# 3) Release prep (stateful; approval-gated export to sandbox_test/)
+./scripts/staragent --project demo --conversation rel-1 preset pack-run release_prep --path . --output sandbox_test/release_review_demo.md
+# Approve from CLI (task id is printed by the command)
+./scripts/staragent --project demo --conversation rel-1 task approve <task_id>
 ```
 
 ## Workflow: Approval + Resume
@@ -89,7 +119,22 @@ curl -s http://127.0.0.1:8095/v1/models | python3 -m json.tool
 - Open WebUI: [docs/OPEN_WEBUI_SETUP.md](docs/OPEN_WEBUI_SETUP.md)
 - CLI: [docs/CLI_SETUP.md](docs/CLI_SETUP.md)
 - MCP: [docs/MCP_SETUP.md](docs/MCP_SETUP.md)
+- Dashboard: [docs/DASHBOARD.md](docs/DASHBOARD.md)
+- Demo flows: [docs/DEMO.md](docs/DEMO.md)
+- External trial: [docs/TRIAL_GUIDE.md](docs/TRIAL_GUIDE.md)
+- Presets and packs: [docs/PRESETS.md](docs/PRESETS.md)
 - Compatibility: [docs/COMPATIBILITY_MAP.md](docs/COMPATIBILITY_MAP.md)
+- Visuals plan (screenshots): [docs/assets/README_VISUALS.md](docs/assets/README_VISUALS.md)
+
+## Screenshots (Optional)
+
+Dashboard screenshots (generated from the local dashboard UI):
+
+![Dashboard Task List](docs/assets/dashboard_tasks.png)
+
+![Dashboard Approval Required](docs/assets/dashboard_approval.png)
+
+![Dashboard Task Detail + Artifact Preview](docs/assets/dashboard_detail.png)
 
 ## CLI Examples
 

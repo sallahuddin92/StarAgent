@@ -298,7 +298,7 @@ Get token usage and budget status.
 ### Example 1: Basic Chat (Non-streaming)
 
 ```bash
-curl -X POST http://localhost:8081/v1/chat/completions \
+curl -X POST http://127.0.0.1:8095/v1/chat/completions \
   -H "Authorization: Bearer local-dev-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -315,7 +315,7 @@ curl -X POST http://localhost:8081/v1/chat/completions \
 ### Example 2: Streaming Chat
 
 ```bash
-curl -X POST http://localhost:8081/v1/chat/completions \
+curl -X POST http://127.0.0.1:8095/v1/chat/completions \
   -H "Authorization: Bearer local-dev-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -331,7 +331,7 @@ curl -X POST http://localhost:8081/v1/chat/completions \
 
 **Turn 1:**
 ```bash
-curl -X POST http://localhost:8081/v1/chat/completions \
+curl -X POST http://127.0.0.1:8095/v1/chat/completions \
   -H "Authorization: Bearer local-dev-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -345,7 +345,7 @@ curl -X POST http://localhost:8081/v1/chat/completions \
 
 **Turn 2 (later):**
 ```bash
-curl -X POST http://localhost:8081/v1/chat/completions \
+curl -X POST http://127.0.0.1:8095/v1/chat/completions \
   -H "Authorization: Bearer local-dev-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -361,7 +361,7 @@ curl -X POST http://localhost:8081/v1/chat/completions \
 ### Example 4: Trigger Memory Compaction
 
 ```bash
-curl -X POST http://localhost:8081/v1/memory/compact \
+curl -X POST http://127.0.0.1:8095/v1/memory/compact \
   -H "Authorization: Bearer local-dev-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -374,7 +374,7 @@ curl -X POST http://localhost:8081/v1/memory/compact \
 ### Example 5: Check Token Budget
 
 ```bash
-curl http://localhost:8081/v1/budget/react-app \
+curl http://127.0.0.1:8095/v1/budget/react-app \
   -H "Authorization: Bearer local-dev-key" \
   -H "Content-Type: application/json"
 ```
@@ -382,7 +382,7 @@ curl http://localhost:8081/v1/budget/react-app \
 ### Example 6: Create Project
 
 ```bash
-curl -X POST http://localhost:8081/v1/projects \
+curl -X POST http://127.0.0.1:8095/v1/projects \
   -H "Authorization: Bearer local-dev-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -433,14 +433,14 @@ X-RateLimit-Reset: 1234567890
 
 ## OpenAI Compatibility
 
-This API is compatible with OpenAI's Chat Completions format. Libraries that support OpenAI can work with MacAgent Proxy by changing the base URL:
+This API is compatible with OpenAI's Chat Completions format. Libraries that support OpenAI can work with StarAgent by changing the base URL:
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
     api_key="local-dev-key",
-    base_url="http://localhost:8081/v1"
+    base_url="http://127.0.0.1:8095/v1"
 )
 
 # Now use normally
@@ -463,7 +463,7 @@ from openai import OpenAI
 
 client = OpenAI(
     api_key="local-dev-key",
-    base_url="http://localhost:8081/v1"
+    base_url="http://127.0.0.1:8095/v1"
 )
 
 # Non-streaming
@@ -491,7 +491,7 @@ import OpenAI from "openai";
 
 const openai = new OpenAI({
   apiKey: "local-dev-key",
-  baseURL: "http://localhost:8081/v1",
+  baseURL: "http://127.0.0.1:8095/v1",
   dangerouslyAllowBrowser: true
 });
 

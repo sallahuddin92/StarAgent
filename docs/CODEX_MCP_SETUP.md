@@ -24,6 +24,20 @@ export STARAGENT_DEFAULT_MODEL="gemma4:e2b"
 python3 -m mcp.server
 ```
 
+## Codex CLI (non-interactive) note
+
+Codex `exec` mode may elicit user confirmation for MCP tool calls. In pure `codex exec` automation runs, that elicitation can result in cancelled tool calls.
+
+For strict non-interactive validation, you can run Codex with approvals bypassed and local shell tools disabled (so only MCP tool calls are possible):
+
+```bash
+codex exec --ephemeral --dangerously-bypass-approvals-and-sandbox \
+  --disable shell_tool --disable unified_exec \
+  "Call the MCP tool staragent_status with arguments {project_id:'codex-mcp', conversation_id:'codex-mcp-1'}."
+```
+
+If you are using Codex interactively (desktop/CLI TUI), normal confirmation prompts are supported and you do not need the bypass flags.
+
 ## What you get
 
 Tools:

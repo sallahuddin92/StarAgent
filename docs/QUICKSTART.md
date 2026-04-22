@@ -28,6 +28,12 @@ Start:
 ./scripts/start_staragent.sh
 ```
 
+If you prefer to run in the foreground (useful in some terminal/sandboxed environments):
+
+```bash
+STARAGENT_FOREGROUND=1 ./scripts/start_staragent.sh
+```
+
 Stop:
 ```bash
 ./scripts/stop_staragent.sh
@@ -37,6 +43,19 @@ Health:
 ```bash
 curl -sS http://127.0.0.1:8095/health | python3 -m json.tool
 ```
+
+Dashboard (local UI):
+```bash
+open http://127.0.0.1:8095/dashboard
+```
+
+Next recommended path:
+
+1. Run one read-only pack (`repo_onboarding`)
+2. Run one stateful pack (`release_prep`) and approve the export
+3. Inspect artifacts in the dashboard and open the primary artifact
+
+For a guided walk-through, see: `docs/DEMO.md`
 
 ## 3) CLI
 

@@ -35,6 +35,23 @@ class _FakeClient:
     def smoke_test_compact(self):
         return {"ok": True, "results": []}
 
+    def presets_list(self):
+        return {
+            "presets": [
+                {"name": "quick_repo_audit", "read_only": True},
+                {"name": "release_review", "read_only": False},
+            ]
+        }
+
+    def preset_packs_list(self):
+        return {"packs": [{"name": "repo_onboarding", "presets": ["quick_repo_audit", "structured_memo"]}]}
+
+    def preset_run(self, preset_name, **kwargs):
+        return {"preset": {"name": preset_name}, "task": {"task_id": "t1"}, "steps": []}
+
+    def preset_pack_run(self, pack_name, **kwargs):
+        return {"pack": {"name": pack_name}, "runs": [{"preset": {"name": "quick_repo_audit"}, "task": {"task_id": "t1"}}]}
+
     def close(self):
         pass
 
@@ -65,7 +82,26 @@ class TestMCPTools(unittest.TestCase):
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["message"], "ask:hi")
 
+    def test_staragent_presets_tools_do_not_alias_to_macagent(self):
+        server = MacAgentMCPServer(_FakeClient())
+        # This must not be blanket-aliased to macagent_presets_list (which doesn't exist).
+        req = {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "staragent_presets_list", "arguments": {}}}
+        resp = server.handle(req)
+        self.assertEqual(resp["id"], 2)
+        text = resp["result"]["content"][0]["text"]
+        payload = json.loads(text)
+        self.assertEqual(payload["status"], "ok")
+        self.assertIn("presets", payload["data"])
+
+    def test_staragent_preset_packs_list(self):
+        server = MacAgentMCPServer(_FakeClient())
+        req = {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "staragent_preset_packs_list", "arguments": {}}}
+        resp = server.handle(req)
+        text = resp["result"]["content"][0]["text"]
+        payload = json.loads(text)
+        self.assertEqual(payload["status"], "ok")
+        self.assertIn("packs", payload["data"])
+
 
 if __name__ == "__main__":
     unittest.main()
-

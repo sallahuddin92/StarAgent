@@ -94,6 +94,343 @@ class MacAgentClient:
         r.raise_for_status()
         return r.json()
 
+    # =========================================================================
+    # Preset Workflows
+    # =========================================================================
+
+    def presets_list(self) -> Dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/presets", headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def preset_packs_list(self) -> Dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/presets/packs", headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def preset_run(
+        self,
+        preset_name: str,
+        *,
+        project_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        path: Optional[str] = None,
+        question: Optional[str] = None,
+        issue: Optional[str] = None,
+        goal: Optional[str] = None,
+        files: Optional[list[str]] = None,
+        logs: Optional[list[str]] = None,
+        mode: Optional[str] = None,
+        output_path: Optional[str] = None,
+        max_steps: Optional[int] = None,
+        max_retries: Optional[int] = None,
+        run_now: bool = True,
+    ) -> Dict[str, Any]:
+        project_id = project_id or self.config.default_project_id
+        conversation_id = conversation_id or self.config.default_conversation_id
+        payload: Dict[str, Any] = {
+            "project_id": project_id,
+            "conversation_id": conversation_id,
+            "path": path,
+            "question": question,
+            "issue": issue,
+            "goal": goal,
+            "files": files,
+            "logs": logs,
+            "mode": mode,
+            "output_path": output_path,
+            "max_steps": max_steps,
+            "max_retries": max_retries,
+            "run_now": run_now,
+        }
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        r = self._http.post(f"{self.v1_base_url}/presets/{preset_name}/run", json=payload, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def preset_pack_run(
+        self,
+        pack_name: str,
+        *,
+        project_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        path: Optional[str] = None,
+        question: Optional[str] = None,
+        issue: Optional[str] = None,
+        goal: Optional[str] = None,
+        files: Optional[list[str]] = None,
+        logs: Optional[list[str]] = None,
+        mode: Optional[str] = None,
+        output_path: Optional[str] = None,
+        max_steps: Optional[int] = None,
+        max_retries: Optional[int] = None,
+        run_now: bool = True,
+    ) -> Dict[str, Any]:
+        project_id = project_id or self.config.default_project_id
+        conversation_id = conversation_id or self.config.default_conversation_id
+        payload: Dict[str, Any] = {
+            "project_id": project_id,
+            "conversation_id": conversation_id,
+            "path": path,
+            "question": question,
+            "issue": issue,
+            "goal": goal,
+            "files": files,
+            "logs": logs,
+            "mode": mode,
+            "output_path": output_path,
+            "max_steps": max_steps,
+            "max_retries": max_retries,
+            "run_now": run_now,
+        }
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        r = self._http.post(f"{self.v1_base_url}/presets/packs/{pack_name}/run", json=payload, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    # =========================================================================
+    # Phase 4: Tasks / Research Mode
+    # =========================================================================
+
+    def task_create(
+        self,
+        *,
+        user_goal: str,
+        task_type: str = "agent",
+        definition_of_done: Optional[str] = None,
+        project_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        max_steps: int = 25,
+        max_retries: int = 2,
+        run_now: bool = True,
+    ) -> Dict[str, Any]:
+        project_id = project_id or self.config.default_project_id
+        conversation_id = conversation_id or self.config.default_conversation_id
+        payload = {
+            "project_id": project_id,
+            "conversation_id": conversation_id,
+            "task_type": task_type,
+            "user_goal": user_goal,
+            "definition_of_done": definition_of_done,
+            "max_steps": max_steps,
+            "max_retries": max_retries,
+            "run_now": run_now,
+        }
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        r = self._http.post(f"{self.v1_base_url}/tasks", json=payload, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def task_status(self, task_id: str) -> Dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        r = self._http.get(f"{self.v1_base_url}/tasks/{task_id}", headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def task_list(
+        self,
+        *,
+        project_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+        if project_id:
+            params["project_id"] = project_id
+        if conversation_id:
+            params["conversation_id"] = conversation_id
+        if status:
+            params["status"] = status
+        r = self._http.get(f"{self.v1_base_url}/tasks", headers=headers, params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def task_inspect(self, task_id: str) -> Dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/tasks/{task_id}/inspect", headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def task_summary(self, task_id: str) -> Dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/tasks/{task_id}/summary", headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def task_logs(self, task_id: str, *, tail_steps: int = 50) -> Dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/tasks/{task_id}/logs", headers=headers, params={"tail_steps": tail_steps})
+        r.raise_for_status()
+        return r.json()
+
+    def task_artifacts(self, task_id: str) -> Dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        r = self._http.get(f"{self.v1_base_url}/tasks/{task_id}/artifacts", headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def task_artifact_preview(
+        self,
+        task_id: str,
+        artifact_name: str,
+        *,
+        format: str = "text",
+        max_bytes: int = 50_000,
+        tail_lines: int = 200,
+    ) -> Dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(
+            f"{self.v1_base_url}/tasks/{task_id}/artifacts/{artifact_name}",
+            headers=headers,
+            params={"format": format, "max_bytes": max_bytes, "tail_lines": tail_lines},
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def task_action(
+        self,
+        task_id: str,
+        *,
+        action: str = "continue",
+        reason: Optional[str] = None,
+        max_step_advances: int = 3,
+        max_duration_s: float = 20.0,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "action": action,
+            "max_step_advances": max_step_advances,
+            "max_duration_s": max_duration_s,
+        }
+        if reason:
+            payload["reason"] = reason
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        r = self._http.post(f"{self.v1_base_url}/tasks/{task_id}/continue", json=payload, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def research_run(
+        self,
+        *,
+        path: str,
+        files: Optional[list[str]] = None,
+        question: Optional[str] = None,
+        mode: str = "research",
+        project_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        max_steps: int = 60,
+        max_retries: int = 1,
+        run_now: bool = True,
+    ) -> Dict[str, Any]:
+        project_id = project_id or self.config.default_project_id
+        conversation_id = conversation_id or self.config.default_conversation_id
+        payload = {
+            "project_id": project_id,
+            "conversation_id": conversation_id,
+            "path": path,
+            "files": files,
+            "question": question,
+            "mode": mode,
+            "max_steps": max_steps,
+            "max_retries": max_retries,
+            "run_now": run_now,
+        }
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        r = self._http.post(f"{self.v1_base_url}/research/run", json=payload, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def repo_audit_run(
+        self,
+        *,
+        path: str,
+        question: Optional[str] = None,
+        project_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        max_steps: int = 25,
+        max_retries: int = 1,
+        run_now: bool = True,
+    ) -> Dict[str, Any]:
+        project_id = project_id or self.config.default_project_id
+        conversation_id = conversation_id or self.config.default_conversation_id
+        payload = {
+            "project_id": project_id,
+            "conversation_id": conversation_id,
+            "path": path,
+            "question": question,
+            "max_steps": max_steps,
+            "max_retries": max_retries,
+            "run_now": run_now,
+        }
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        r = self._http.post(f"{self.v1_base_url}/repo_audit/run", json=payload, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def issue_triage_run(
+        self,
+        *,
+        path: str,
+        issue: str,
+        files: Optional[list[str]] = None,
+        logs: Optional[list[str]] = None,
+        project_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        max_steps: int = 25,
+        max_retries: int = 1,
+        run_now: bool = True,
+    ) -> Dict[str, Any]:
+        project_id = project_id or self.config.default_project_id
+        conversation_id = conversation_id or self.config.default_conversation_id
+        payload = {
+            "project_id": project_id,
+            "conversation_id": conversation_id,
+            "path": path,
+            "issue": issue,
+            "files": files,
+            "logs": logs,
+            "max_steps": max_steps,
+            "max_retries": max_retries,
+            "run_now": run_now,
+        }
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        r = self._http.post(f"{self.v1_base_url}/issue_triage/run", json=payload, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def write_run(
+        self,
+        *,
+        path: str,
+        goal: str,
+        files: Optional[list[str]] = None,
+        project_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        max_steps: int = 25,
+        max_retries: int = 1,
+        run_now: bool = True,
+    ) -> Dict[str, Any]:
+        project_id = project_id or self.config.default_project_id
+        conversation_id = conversation_id or self.config.default_conversation_id
+        payload = {
+            "project_id": project_id,
+            "conversation_id": conversation_id,
+            "path": path,
+            "goal": goal,
+            "files": files,
+            "max_steps": max_steps,
+            "max_retries": max_retries,
+            "run_now": run_now,
+        }
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        r = self._http.post(f"{self.v1_base_url}/write/run", json=payload, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
     def chat(
         self,
         prompt: str,
