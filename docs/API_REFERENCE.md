@@ -1,10 +1,13 @@
-# MacAgent Proxy v2.0 – API Reference
+# StarAgent – API Reference
 
 ## Base URL
 
-```
-http://localhost:8081
-```
+StarAgent exposes an OpenAI-compatible API under `/v1`.
+
+- Health base: `http://127.0.0.1:8095`
+- OpenAI-compatible base: `http://127.0.0.1:8095/v1`
+
+If you changed the port, substitute `${PORT}` accordingly.
 
 ## Authentication
 
@@ -17,7 +20,7 @@ Authorization: Bearer {PROXY_API_KEY}
 Example:
 ```bash
 curl -H "Authorization: Bearer local-dev-key" \
-     http://localhost:8081/v1/chat/completions
+     http://127.0.0.1:8095/v1/chat/completions
 ```
 
 ---
@@ -46,6 +49,8 @@ Service health check and feature status.
   }
 }
 ```
+
+Note: API identity branding strings can be toggled via `STARAGENT_BRAND_API=true` without changing endpoint shapes.
 
 ---
 

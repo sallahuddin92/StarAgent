@@ -82,6 +82,15 @@ curl -s http://127.0.0.1:8095/health | python3 -m json.tool
 curl -s http://127.0.0.1:8095/v1/models | python3 -m json.tool
 ```
 
+## Docs
+
+- Quickstart: [docs/QUICKSTART.md](docs/QUICKSTART.md)
+- API reference: [docs/API_REFERENCE.md](docs/API_REFERENCE.md)
+- Open WebUI: [docs/OPEN_WEBUI_SETUP.md](docs/OPEN_WEBUI_SETUP.md)
+- CLI: [docs/CLI_SETUP.md](docs/CLI_SETUP.md)
+- MCP: [docs/MCP_SETUP.md](docs/MCP_SETUP.md)
+- Compatibility: [docs/COMPATIBILITY_MAP.md](docs/COMPATIBILITY_MAP.md)
+
 ## CLI Examples
 
 ```bash
