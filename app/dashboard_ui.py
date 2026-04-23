@@ -380,6 +380,11 @@ def render_dashboard_html(*, title: str = "StarAgent Dashboard") -> str:
               <div class="k">pack/preset</div><div class="v" id="dPack"></div>
             </div>
 
+            <div id="datasetBox" class="banner" style="display:none; margin-top:12px;">
+              <div class="title">Dataset metrics</div>
+              <div class="body" id="dDataset"></div>
+            </div>
+
             <div class="grid2" style="margin-top:12px;">
               <div>
                 <div class="muted" style="margin-bottom:6px;">Final summary (or last completed)</div>
@@ -677,7 +682,8 @@ def render_dashboard_html(*, title: str = "StarAgent Dashboard") -> str:
           const tr = (inspect.task || {{}});
           const prog = (inspect.progress || {{}});
           const cur = (prog.current_step || {{}});
-          const primary = (inspect.primary_artifact || artifacts.primary_artifact || {{}});
+          const meta = (summary.task_meta || inspect.task_meta || {{}});
+          const primary = (meta.primary_artifact || inspect.primary_artifact || artifacts.primary_artifact || {{}});
           selectedPrimaryName = primary.name || null;
 
           setText("dStatus", tr.status || "");
@@ -701,6 +707,20 @@ def render_dashboard_html(*, title: str = "StarAgent Dashboard") -> str:
             (cur.instruction || ""),
           ].filter(Boolean).join("\\n\\n");
           setText("dCurrent", curTxt || "(none)");
+
+          // dataset metrics (optional; shown for dataset-mode research tasks)
+          const dmBox = document.getElementById("datasetBox");
+          const dmText = document.getElementById("dDataset");
+          dmBox.style.display = "none";
+          dmText.textContent = "";
+          const dm = (meta.dataset_meta || summary.dataset_meta || inspect.dataset_meta || null);
+          if (dm && typeof dm === "object") {{
+            const lines = Array.isArray(dm.display_lines) ? dm.display_lines : [];
+            if (lines.length) {{
+              dmText.textContent = lines.join("\\n");
+              dmBox.style.display = "block";
+            }}
+          }}
 
           // logs
           const logsArr = logs.logs || [];
@@ -736,29 +756,17 @@ def render_dashboard_html(*, title: str = "StarAgent Dashboard") -> str:
           const apprText = document.getElementById("approvalText");
           apprBox.style.display = "none";
           apprText.textContent = "";
+          const approval = (meta.approval || null);
           const pending = (aj && aj.pending_approval) ? aj.pending_approval : null;
-          if (pending && pending.tool_call) {{
+          if (approval && approval.required) {{
+            const lines = Array.isArray(approval.display_lines) ? approval.display_lines : [];
+            apprText.textContent = lines.join("\\n");
+            apprBox.style.display = "block";
+          }} else if (pending && pending.tool_call) {{
+            // Back-compat fallback: older servers store approval in artifacts_json.
             const tc = pending.tool_call;
             const fn = (tc.function || {{}}).name || "unknown";
-            let args = {{}};
-            try {{
-              args = JSON.parse((tc.function || {{}}).arguments || "{{}}");
-            }} catch (e) {{
-              args = {{ raw_arguments: (tc.function || {{}}).arguments || "" }};
-            }}
-            const lines = [];
-            lines.push("action: " + fn);
-            if (args.path) lines.push("target: " + args.path);
-            if (pending.note) lines.push("note: " + pending.note);
-            if (fn === "write_file") {{
-              const contentLen = (args.content || "").length;
-              lines.push("will: write/overwrite file");
-              lines.push("content_bytes: " + contentLen);
-              if (String(args.path || "").startsWith("sandbox_test/")) {{
-                lines.push("destination: sandbox_test (safe by default)");
-              }}
-            }}
-            apprText.textContent = lines.join("\\n");
+            apprText.textContent = "action: " + fn;
             apprBox.style.display = "block";
           }}
 
@@ -769,8 +777,9 @@ def render_dashboard_html(*, title: str = "StarAgent Dashboard") -> str:
           const btnR = document.getElementById("btnReject");
           // Allow starting newly-created tasks as well.
           btnC.disabled = !(st === "pending" || st === "partial" || st === "running");
-          btnA.disabled = !(st === "paused" && pending);
-          btnR.disabled = !(st === "paused" && pending);
+          const canApprove = (approval && approval.required) || (st === "paused" && pending);
+          btnA.disabled = !(st === "paused" && canApprove);
+          btnR.disabled = !(st === "paused" && canApprove);
         }} catch (e) {{
           setText("dFinal", "Error loading task detail: " + e.message);
         }}

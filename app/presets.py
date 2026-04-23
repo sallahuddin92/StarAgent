@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .artifact_registry import preset_primary_artifact
+
 
 @dataclass(frozen=True)
 class PresetSpec:
@@ -17,6 +19,12 @@ class PresetSpec:
     default_max_steps: int
     default_max_retries: int
     expected_outputs: List[str]
+    # Optional override for listing/UX; if unset, derived from task_type.
+    primary_artifact: Optional[str] = None
+    # Optional operator defaults for preset-run inputs (used by API handler).
+    default_question: Optional[str] = None
+    default_issue: Optional[str] = None
+    default_goal: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +49,7 @@ PRESETS: Dict[str, PresetSpec] = {
         task_type="repo_audit",
         default_max_steps=12,
         default_max_retries=1,
+        primary_artifact=None,
         expected_outputs=[
             "file_index.json",
             "entry_points.md",
@@ -58,6 +67,7 @@ PRESETS: Dict[str, PresetSpec] = {
         task_type="repo_audit",
         default_max_steps=40,
         default_max_retries=1,
+        primary_artifact=None,
         expected_outputs=[
             "file_index.json",
             "entry_points.md",
@@ -75,6 +85,7 @@ PRESETS: Dict[str, PresetSpec] = {
         task_type="issue_triage",
         default_max_steps=25,
         default_max_retries=1,
+        primary_artifact=None,
         expected_outputs=[
             "issue_summary.md",
             "evidence_table.json",
@@ -91,6 +102,7 @@ PRESETS: Dict[str, PresetSpec] = {
         task_type="research",
         default_max_steps=60,
         default_max_retries=1,
+        primary_artifact=None,
         expected_outputs=[
             "file_index.json",
             "chunk_summaries.json",
@@ -100,6 +112,59 @@ PRESETS: Dict[str, PresetSpec] = {
             "final_report.md",
         ],
     ),
+    "dataset_profile": PresetSpec(
+        name="dataset_profile",
+        description="Read-only JSON dataset mode: profile a dominant .json/.jsonl dataset and plan bounded batch analysis.",
+        read_only=True,
+        may_require_approval=False,
+        task_type="research",
+        default_max_steps=40,
+        default_max_retries=1,
+        primary_artifact="dataset_facts.json",
+        expected_outputs=[
+            "dataset_profile.json",
+            "dataset_facts.json",
+            "sample_records.json",
+            "batch_summaries.json",
+            "dataset_brief.md",
+        ],
+        default_question=(
+            "Profile this JSON dataset in bounded batches.\n"
+            "- Detect JSON kind and sample records\n"
+            "- Estimate coverage and duplicates (URL-based when available)\n"
+            "Return grounded artifacts only; do not fabricate."
+        ),
+    ),
+    "dataset_theme_report": PresetSpec(
+        name="dataset_theme_report",
+        description="Read-only JSON dataset mode: run dataset analysis through theme extraction and produce a grounded report.",
+        read_only=True,
+        may_require_approval=False,
+        task_type="research",
+        default_max_steps=80,
+        default_max_retries=1,
+        primary_artifact="dataset_theme_report.md",
+        expected_outputs=[
+            "dataset_profile.json",
+            "dataset_facts.json",
+            "sample_records.json",
+            "batch_summaries.json",
+            "dataset_brief.md",
+            "themes.json",
+            "themes.md",
+            "dataset_theme_report.md",
+            "final_report.md",
+            "open_questions.md",
+        ],
+        default_question=(
+            "Analyze this JSON dataset in bounded batches.\n"
+            "- Profile schema/shape\n"
+            "- Summarize sampled records\n"
+            "- Detect duplicates (URL-based) and estimate coverage\n"
+            "- Extract dominant themes with grounded examples\n"
+            "Return grounded artifacts only; do not fabricate."
+        ),
+    ),
     "structured_memo": PresetSpec(
         name="structured_memo",
         description="Read-only writing profile: generate a structured memo artifact from notes/docs without fabricated letterhead.",
@@ -108,12 +173,19 @@ PRESETS: Dict[str, PresetSpec] = {
         task_type="writing",
         default_max_steps=25,
         default_max_retries=1,
+        primary_artifact=None,
         expected_outputs=[
             "source_index.json",
             "outline.md",
             "draft.md",
             "final_output.md",
         ],
+        default_goal=(
+            "Write a short structured memo with clear section headings and bullet points.\n"
+            "Ground the memo strictly in the provided sources/artifacts.\n"
+            "- If information is missing, say 'Unknown' rather than guessing.\n"
+            "- Do not include TO/FROM/DATE/SUBJECT headers or bracket placeholders."
+        ),
     ),
     "release_review": PresetSpec(
         name="release_review",
@@ -124,6 +196,7 @@ PRESETS: Dict[str, PresetSpec] = {
         task_type="repo_audit",
         default_max_steps=25,
         default_max_retries=1,
+        primary_artifact=None,
         expected_outputs=[
             # Task artifacts:
             "audit_report.md",
@@ -188,6 +261,7 @@ def list_presets() -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for k in sorted(PRESETS.keys()):
         p = PRESETS[k]
+        primary = p.primary_artifact or preset_primary_artifact(p.name, p.task_type)
         out.append(
             {
                 "name": p.name,
@@ -197,7 +271,7 @@ def list_presets() -> List[Dict[str, Any]]:
                 "task_type": p.task_type,
                 "default_max_steps": p.default_max_steps,
                 "default_max_retries": p.default_max_retries,
-                "primary_artifact": _primary_artifact_for_task_type(p.task_type),
+                "primary_artifact": primary,
                 "expected_outputs": list(p.expected_outputs),
             }
         )
@@ -223,19 +297,8 @@ def list_preset_packs() -> List[Dict[str, Any]]:
 
 
 def _primary_artifact_for_task_type(task_type: str) -> Optional[str]:
-    tt = (task_type or "").strip().lower()
-    if tt == "research":
-        return "final_report.md"
-    if tt == "repo_audit":
-        return "audit_report.md"
-    if tt == "issue_triage":
-        return "next_actions.md"
-    if tt == "writing":
-        return "final_output.md"
-    if tt == "agent":
-        # agent tasks are flexible; preset may specify an output file.
-        return None
-    return None
+    # Legacy helper preserved for compatibility; new code should use artifact_registry.
+    return preset_primary_artifact(None, task_type)
 
 
 def default_release_review_output_path(*, ts: Optional[int] = None) -> str:

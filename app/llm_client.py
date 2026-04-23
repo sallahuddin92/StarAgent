@@ -29,6 +29,7 @@ class OllamaChatClient:
         *,
         model: Optional[str] = None,
         temperature: float = 0.2,
+        num_predict: Optional[int] = None,
     ) -> Dict[str, Any]:
         url = f"{self.base_url}{self.chat_path}"
         payload = {
@@ -37,6 +38,8 @@ class OllamaChatClient:
             "stream": False,
             "temperature": temperature,
         }
+        if isinstance(num_predict, int) and num_predict > 0:
+            payload["options"] = {"num_predict": int(num_predict)}
         r = await self.http.post(url, json=payload)
         if r.status_code >= 400:
             raise RuntimeError(f"Ollama error {r.status_code}: {r.text[:300]}")
@@ -51,8 +54,9 @@ class OllamaChatClient:
         *,
         model: Optional[str] = None,
         temperature: float = 0.2,
+        num_predict: Optional[int] = None,
     ) -> str:
-        data = await self.chat(messages, model=model, temperature=temperature)
+        data = await self.chat(messages, model=model, temperature=temperature, num_predict=num_predict)
         msg = data.get("message") or {}
         content = msg.get("content")
         return str(content or "")
@@ -74,4 +78,3 @@ def extract_json_object(text: str) -> Dict[str, Any]:
     except Exception:
         logger.warning("Failed to parse JSON from model output (truncated): %r", text[:200])
         return {}
-

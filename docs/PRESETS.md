@@ -67,6 +67,15 @@ Print copy-paste examples:
 ./scripts/staragent --project demo --conversation rel-1 task approve <task_id>
 ```
 
+## Dataset Presets (JSON/JSONL)
+
+For folders dominated by a single `.json` / `.jsonl` dataset (or a direct dataset file path), use dataset-mode presets:
+
+```bash
+./scripts/staragent --project demo --conversation ds-1 preset run dataset_profile --path /path/to/dataset_folder
+./scripts/staragent --project demo --conversation ds-1 preset run dataset_theme_report --path /path/to/dataset_folder
+```
+
 ## Inspect Outputs
 
 After a pack run, use the printed `task_id` values (or `staragent task list`) to inspect artifacts:
@@ -75,4 +84,3 @@ After a pack run, use the printed `task_id` values (or `staragent task list`) to
 ./scripts/staragent task artifacts <task_id>
 ./scripts/staragent task artifact <task_id> audit_report.md --tail-lines 80
 ```
-

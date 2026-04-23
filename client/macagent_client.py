@@ -69,6 +69,21 @@ def _root_from_v1(v1_url: str) -> str:
     return v1_url[: -len("/v1")]
 
 
+def _resolve_client_path(path: Optional[str]) -> Optional[str]:
+    """
+    Resolve a user-provided path on the client side.
+
+    Important: the server cannot safely interpret relative paths because its CWD
+    may differ from the CLI/MCP client CWD. Always send absolute paths when possible.
+    """
+    if path is None:
+        return None
+    p = os.path.expanduser(str(path))
+    if not os.path.isabs(p):
+        p = os.path.abspath(p)
+    return p
+
+
 class MacAgentClient:
     """
     Thin adapter over the existing FastAPI runtime.
@@ -130,6 +145,7 @@ class MacAgentClient:
     ) -> Dict[str, Any]:
         project_id = project_id or self.config.default_project_id
         conversation_id = conversation_id or self.config.default_conversation_id
+        path = _resolve_client_path(path)
         payload: Dict[str, Any] = {
             "project_id": project_id,
             "conversation_id": conversation_id,
@@ -170,6 +186,7 @@ class MacAgentClient:
     ) -> Dict[str, Any]:
         project_id = project_id or self.config.default_project_id
         conversation_id = conversation_id or self.config.default_conversation_id
+        path = _resolve_client_path(path)
         payload: Dict[str, Any] = {
             "project_id": project_id,
             "conversation_id": conversation_id,
@@ -328,6 +345,7 @@ class MacAgentClient:
     ) -> Dict[str, Any]:
         project_id = project_id or self.config.default_project_id
         conversation_id = conversation_id or self.config.default_conversation_id
+        path = _resolve_client_path(path) or path
         payload = {
             "project_id": project_id,
             "conversation_id": conversation_id,
@@ -357,6 +375,7 @@ class MacAgentClient:
     ) -> Dict[str, Any]:
         project_id = project_id or self.config.default_project_id
         conversation_id = conversation_id or self.config.default_conversation_id
+        path = _resolve_client_path(path) or path
         payload = {
             "project_id": project_id,
             "conversation_id": conversation_id,
@@ -386,6 +405,7 @@ class MacAgentClient:
     ) -> Dict[str, Any]:
         project_id = project_id or self.config.default_project_id
         conversation_id = conversation_id or self.config.default_conversation_id
+        path = _resolve_client_path(path) or path
         payload = {
             "project_id": project_id,
             "conversation_id": conversation_id,
@@ -416,6 +436,7 @@ class MacAgentClient:
     ) -> Dict[str, Any]:
         project_id = project_id or self.config.default_project_id
         conversation_id = conversation_id or self.config.default_conversation_id
+        path = _resolve_client_path(path) or path
         payload = {
             "project_id": project_id,
             "conversation_id": conversation_id,

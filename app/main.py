@@ -60,6 +60,13 @@ from .issue_triage import IssueTriagePipeline
 from .writing_profile import WritingPipeline
 from .presets import PRESETS, PACKS, list_presets, list_preset_packs, default_release_review_output_path
 from .dashboard_ui import render_dashboard_html
+from .artifact_registry import task_conventions
+from .task_metadata import (
+    task_meta as build_task_meta,
+    time_meta as _tm_time_meta,
+    primary_artifact as _tm_primary_artifact,
+    dataset_meta as _tm_dataset_meta,
+)
 
 # Configuration
 load_dotenv()
@@ -722,16 +729,9 @@ def _task_progress(tr: Dict[str, Any], steps: List[Dict[str, Any]]) -> Dict[str,
     }
 
 def _primary_artifact_name(task_type: Optional[str]) -> Optional[str]:
-    tt = (task_type or "").strip().lower()
-    if tt == "research":
-        return "final_report.md"
-    if tt == "repo_audit":
-        return "audit_report.md"
-    if tt == "issue_triage":
-        return "next_actions.md"
-    if tt == "writing":
-        return "final_output.md"
-    return None
+    # Compatibility shim: use centralized artifact conventions.
+    conv = task_conventions(task_type, artifacts_json=None)
+    return conv.primary
 
 
 def _parse_iso_dt(s: Any) -> Optional[datetime]:
@@ -750,29 +750,12 @@ def _parse_iso_dt(s: Any) -> Optional[datetime]:
 
 
 def _task_time_meta(tr: Dict[str, Any]) -> Dict[str, Any]:
-    created = _parse_iso_dt(tr.get("created_at"))
-    updated = _parse_iso_dt(tr.get("updated_at"))
-    now = datetime.utcnow()
-    age_s = (now - created).total_seconds() if created else None
-    duration_s = (updated - created).total_seconds() if (created and updated) else None
-    return {"age_s": age_s, "duration_s": duration_s}
-
+    # Compatibility shim: use centralized task metadata builder.
+    return _tm_time_meta(tr)
 
 def _task_primary_artifact(tr: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    name = _primary_artifact_name(tr.get("task_type"))
-    if not name:
-        return None
-    aj = tr.get("artifacts_json") or {}
-    artifact_dir = Path(str(aj.get("artifact_dir") or (Path(".runtime") / "tasks" / tr.get("task_id", "")))).resolve()
-    p = (artifact_dir / name).resolve()
-    exists = artifact_dir.exists() and p.exists() and p.is_file()
-    out: Dict[str, Any] = {"name": name, "exists": exists}
-    if exists:
-        out["path"] = str(p)
-        out["preview_url"] = f"/v1/tasks/{tr.get('task_id')}/artifacts/{name}"
-    else:
-        out["path"] = str(p)
-    return out
+    # Compatibility shim: use centralized task metadata builder.
+    return _tm_primary_artifact(tr)
 
 
 def _safe_task_artifact_path(task_id: str, artifact_name: str) -> Path:
@@ -839,7 +822,29 @@ async def list_tasks(
         offset=offset,
         order="updated_desc",
     )
-    return JSONResponse(content={"tasks": runs, "limit": limit, "offset": offset})
+    # Additive metadata for clients (kept light; no file reads here).
+    enriched: List[Dict[str, Any]] = []
+    for tr in runs:
+        try:
+            aj = tr.get("artifacts_json") or {}
+        except Exception:
+            aj = {}
+        conv = task_conventions(tr.get("task_type"), artifacts_json=aj)
+        labels = {
+            "pack_name": aj.get("pack_name") if isinstance(aj.get("pack_name"), str) else None,
+            "preset_name": (aj.get("preset") if isinstance(aj.get("preset"), str) else None)
+            or (aj.get("pack_preset") if isinstance(aj.get("pack_preset"), str) else None),
+        }
+        pending = aj.get("pending_approval") if isinstance(aj, dict) else None
+        enriched.append(
+            {
+                **tr,
+                "primary_artifact_name": conv.primary,
+                "labels": labels,
+                "approval_required": bool(isinstance(pending, dict) and pending.get("tool_call")),
+            }
+        )
+    return JSONResponse(content={"tasks": enriched, "limit": limit, "offset": offset})
 
 
 @app.get("/v1/tasks/{task_id}")
@@ -865,13 +870,16 @@ async def inspect_task(
     if not tr:
         raise HTTPException(status_code=404, detail="Task not found")
     steps = db.list_task_steps(task_id)
-    prog = _task_progress(tr, steps)
+    meta = build_task_meta(tr, steps)
+    prog = meta.get("progress") or _task_progress(tr, steps)
     return JSONResponse(
         content={
             "task": tr,
             "progress": prog,
             "time": _task_time_meta(tr),
             "primary_artifact": _task_primary_artifact(tr),
+            "dataset_meta": _tm_dataset_meta(tr),
+            "task_meta": meta,
             "steps": steps,
         }
     )
@@ -887,7 +895,8 @@ async def task_summary(
     if not tr:
         raise HTTPException(status_code=404, detail="Task not found")
     steps = db.list_task_steps(task_id)
-    prog = _task_progress(tr, steps)
+    meta = build_task_meta(tr, steps)
+    prog = meta.get("progress") or _task_progress(tr, steps)
 
     final = tr.get("final_summary")
     if not final and prog.get("last_completed_step"):
@@ -910,6 +919,8 @@ async def task_summary(
         "progress": prog,
         "time": _task_time_meta(tr),
         "primary_artifact": _task_primary_artifact(tr),
+        "dataset_meta": _tm_dataset_meta(tr),
+        "task_meta": meta,
     }
     return JSONResponse(content=out)
 
@@ -957,7 +968,8 @@ async def get_task_artifacts(
     aj = tr.get("artifacts_json") or {}
     artifact_dir = str(aj.get("artifact_dir") or (Path(".runtime") / "tasks" / task_id))
     d = Path(artifact_dir)
-    primary_name = _primary_artifact_name(tr.get("task_type"))
+    conv = task_conventions(tr.get("task_type"), artifacts_json=aj)
+    primary_name = conv.primary
     files: List[Dict[str, Any]] = []
     if d.exists() and d.is_dir():
         for p in sorted(d.glob("*")):
@@ -981,7 +993,15 @@ async def get_task_artifacts(
                 files.append({"name": p.name, "is_primary": bool(primary_name and p.name == primary_name)})
 
     primary = _task_primary_artifact(tr)
-    return JSONResponse(content={"task_id": task_id, "artifact_dir": artifact_dir, "primary_artifact": primary, "files": files})
+    return JSONResponse(
+        content={
+            "task_id": task_id,
+            "artifact_dir": artifact_dir,
+            "primary_artifact": primary,
+            "conventions": {"primary_name": conv.primary, "important": conv.important},
+            "files": files,
+        }
+    )
 
 
 @app.get("/v1/tasks/{task_id}/artifacts/{artifact_name}")
@@ -1090,7 +1110,8 @@ async def research_run(
     db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
     tr = db.get_task_run(tr["task_id"]) or tr
     if req.run_now:
-        out = await task_engine.run(tr["task_id"], max_step_advances=3, max_duration_s=25.0)
+        # Keep launch responsive: do minimal safe work and return quickly with a task_id.
+        out = await task_engine.run(tr["task_id"], max_step_advances=1, max_duration_s=10.0)
         return JSONResponse(content=out.to_dict())
     return JSONResponse(status_code=201, content={"task": tr, "steps": []})
 
@@ -1278,19 +1299,47 @@ async def _run_preset_internal(preset_name: str, req: PresetRunRequest) -> Dict[
             definition_of_done="Artifacts written: file_index.json, chunk_summaries.json, file_summaries.md, research_brief.md, open_questions.md, final_report.md",
             max_steps=max_steps,
             max_retries=max_retries,
-            artifacts_json={"root_path": path, "files": req.files, "question": question, "mode": mode},
+            artifacts_json={"preset": name, "root_path": path, "files": req.files, "question": question, "mode": mode},
         )
         artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
         db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
         tr = db.get_task_run(tr["task_id"]) or tr
         if req.run_now:
-            out = await task_engine.run(tr["task_id"], max_step_advances=3, max_duration_s=25.0)
+            # Keep preset launch responsive; heavy work should happen via bounded /continue calls.
+            out = await task_engine.run(tr["task_id"], max_step_advances=1, max_duration_s=10.0)
+            return {"preset": spec.__dict__, **out.to_dict()}
+        return {"preset": spec.__dict__, "task": tr, "steps": []}
+
+    if name in ("dataset_profile", "dataset_theme_report"):
+        path = _require(req, "path")
+        # Question is optional; keep a stable operator-friendly default.
+        question = req.question or (spec.default_question or "Analyze this JSON dataset in bounded batches.")
+        mode = req.mode or "research"
+        tr = task_engine.create_task(
+            project_id=req.project_id,
+            conversation_id=req.conversation_id,
+            task_type="research",
+            user_goal=question,
+            definition_of_done=(
+                "Artifacts written (dataset mode): dataset_profile.json, dataset_facts.json, sample_records.json, "
+                "batch_summaries.json, dataset_brief.md, themes.json, themes.md, dataset_theme_report.md, final_report.md, open_questions.md"
+            ),
+            max_steps=max_steps,
+            max_retries=max_retries,
+            artifacts_json={"preset": name, "root_path": path, "files": req.files, "question": question, "mode": mode},
+        )
+        artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
+        db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
+        tr = db.get_task_run(tr["task_id"]) or tr
+        if req.run_now:
+            # Keep launch responsive; dataset pipelines often need multiple continues.
+            out = await task_engine.run(tr["task_id"], max_step_advances=1, max_duration_s=10.0)
             return {"preset": spec.__dict__, **out.to_dict()}
         return {"preset": spec.__dict__, "task": tr, "steps": []}
 
     if name == "structured_memo":
         path = _require(req, "path")
-        goal = req.goal or "Write a short structured memo with clear section headings and bullet points. Do not include TO/FROM/DATE/SUBJECT headers or bracket placeholders."
+        goal = req.goal or (spec.default_goal or "Write a short structured memo with clear section headings and bullet points.")
         tr = task_engine.create_task(
             project_id=req.project_id,
             conversation_id=req.conversation_id,

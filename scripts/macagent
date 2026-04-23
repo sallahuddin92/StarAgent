@@ -2,7 +2,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
 
 export STARAGENT_CLI_PROG="macagent"
 PYTHON="${STARAGENT_PYTHON:-}"
@@ -14,4 +13,5 @@ if [[ -z "$PYTHON" ]]; then
   fi
 fi
 
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 exec "$PYTHON" -m cli.macagent "$@"

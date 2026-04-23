@@ -117,6 +117,56 @@ def _primary_name_for_type(task_type: Any) -> str:
         return "final_output.md"
     return ""
 
+def _print_dataset_meta(dm: Any) -> None:
+    if not isinstance(dm, dict) or not dm:
+        return
+    print("dataset:")
+    lines = dm.get("display_lines")
+    if isinstance(lines, list) and lines:
+        for ln in lines[:20]:
+            if ln is None:
+                continue
+            print("  " + str(ln))
+        return
+    if dm.get("dataset_path"):
+        print(f"  path:      {dm.get('dataset_path')}")
+    if dm.get("json_kind"):
+        print(f"  kind:      {dm.get('json_kind')}")
+    if dm.get("size_bytes") is not None:
+        print(f"  size:      {dm.get('size_bytes')} bytes")
+    if dm.get("sample_records_count") is not None:
+        print(f"  sampled:   {dm.get('sample_records_count')}")
+    if dm.get("planned_batches") is not None:
+        print(f"  batches:   {dm.get('planned_batches')}")
+    if dm.get("duplicate_ratio") is not None:
+        try:
+            print(f"  dup_ratio: {float(dm.get('duplicate_ratio')):.3f}")
+        except Exception:
+            print(f"  dup_ratio: {dm.get('duplicate_ratio')}")
+    if dm.get("coverage_ratio") is not None:
+        try:
+            print(f"  coverage:  {float(dm.get('coverage_ratio')):.3f}")
+        except Exception:
+            print(f"  coverage:  {dm.get('coverage_ratio')}")
+    if dm.get("confidence"):
+        print(f"  conf:      {dm.get('confidence')}")
+    themes = dm.get("top_themes") or []
+    if isinstance(themes, list) and themes:
+        parts = []
+        for t in themes[:5]:
+            if not isinstance(t, dict):
+                continue
+            nm = str(t.get("name") or "").strip()
+            if not nm:
+                continue
+            pct = t.get("estimated_percentage")
+            if isinstance(pct, (int, float)) and int(pct) > 0:
+                parts.append(f"{nm} ({int(pct)}%)")
+            else:
+                parts.append(nm)
+        if parts:
+            print("  themes:    " + "; ".join(parts))
+
 
 def build_parser() -> argparse.ArgumentParser:
     prog = os.getenv("STARAGENT_CLI_PROG") or os.getenv("MACAGENT_CLI_PROG") or os.path.basename(sys.argv[0] or "") or "staragent"
@@ -417,10 +467,16 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print("  ./scripts/staragent --project demo --conversation rel-1 preset pack-run release_prep --path . --output sandbox_test/release_prep.md")
                 print("  ./scripts/staragent --project demo --conversation rel-1 task approve <task_id>")
                 print("")
+                print("JSON dataset theme report (preset; read-only):")
+                print("  ./scripts/staragent --project demo --conversation ds-1 preset run dataset_theme_report --path /path/to/dataset_folder")
+                print("  ./scripts/staragent --project demo --conversation ds-1 task continue <task_id> --steps 3 --duration 20")
+                print("")
                 print("API base URL:")
                 print(f"  {base}")
                 return 0
             if args.preset_cmd == "run":
+                if args.path is None:
+                    args.path = os.getcwd()
                 out = client.preset_run(
                     str(args.name),
                     project_id=ctx["project_id"],
@@ -457,6 +513,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     print(f"action_required: {ar.get('type')}")
                 return 0
             if args.preset_cmd == "pack-run":
+                if args.path is None:
+                    args.path = os.getcwd()
                 out = client.preset_pack_run(
                     str(args.name),
                     project_id=ctx["project_id"],
@@ -587,7 +645,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     print("(no tasks found)")
                     return 0
                 for t in tasks:
-                    primary = _primary_name_for_type(t.get("task_type"))
+                    primary = t.get("primary_artifact_name") or _primary_name_for_type(t.get("task_type"))
                     print(
                         f"{t.get('task_id')}  {t.get('status'):>9}  {t.get('task_type'):>10}  step={t.get('current_step_index')}/{t.get('max_steps')}  retry={t.get('retry_count')}  primary={primary or '-'}  updated={_fmt_dt(t.get('updated_at'))}"
                     )
@@ -606,12 +664,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                 cur = prog.get("current_step") or {}
                 time_meta = out.get("time") or {}
                 primary = out.get("primary_artifact") or {}
+                meta = out.get("task_meta") or {}
                 print(f"task_id: {task.get('task_id')}")
                 print(f"status:  {task.get('status')}  type={task.get('task_type')}  retry={task.get('retry_count')}  age={_fmt_age_s(time_meta.get('age_s'))}")
                 print(f"steps:   {counts.get('completed')}/{counts.get('total')}  ({prog.get('percent_complete')}%)")
                 if primary:
                     marker = "ok" if primary.get("exists") else "missing"
                     print(f"primary: {primary.get('name')} ({marker})")
+                _print_dataset_meta((meta.get("dataset_meta")) or out.get("dataset_meta"))
                 if cur:
                     print(f"current: #{cur.get('step_index')} {cur.get('step_type')} [{cur.get('status')}]")
                     instr = (cur.get('instruction') or '')
@@ -631,12 +691,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                 counts = prog.get("counts") or {}
                 time_meta = out.get("time") or {}
                 primary = out.get("primary_artifact") or {}
+                meta = out.get("task_meta") or {}
                 print(f"task_id: {task.get('task_id')}")
                 print(f"status:  {task.get('status')}  verdict={task.get('final_verdict')}  retry={task.get('retry_count')}  age={_fmt_age_s(time_meta.get('age_s'))}")
                 print(f"progress:{counts.get('completed')}/{counts.get('total')} ({prog.get('percent_complete')}%)")
                 if primary:
                     marker = "ok" if primary.get("exists") else "missing"
                     print(f"primary: {primary.get('name')} ({marker})")
+                _print_dataset_meta((meta.get("dataset_meta")) or out.get("dataset_meta"))
                 if task.get("final_summary"):
                     print("\n" + str(task.get("final_summary")))
                 return 0

@@ -13,6 +13,7 @@ from .planner import Planner
 from .executor import Executor
 from .workspace_state import WorkspaceTracker
 from .approval import ApprovalPolicy
+from .intake import classify_input
 from .research_mode import ResearchPipeline, ResearchInputs
 from .repo_audit import RepoAuditPipeline, RepoAuditInputs
 from .issue_triage import IssueTriagePipeline, IssueTriageInputs
@@ -131,6 +132,25 @@ class TaskEngine:
         )
         # Ensure artifact dir exists.
         _artifact_dir(tr["task_id"]).mkdir(parents=True, exist_ok=True)
+
+        # Adaptive intake preflight for path-based tasks.
+        # This is intentionally lightweight and bounded (stat-only directory scan).
+        try:
+            aj = tr.get("artifacts_json") or {}
+            if "input_intake" not in aj:
+                root_path = aj.get("root_path") or aj.get("path")
+                if root_path:
+                    intake = classify_input(str(root_path)).to_dict()
+                    aj = {**aj, "input_intake": intake}
+                    self.db.update_task_run(tr["task_id"], {"artifacts_json": aj})
+                    # Persist a task-local artifact for operator visibility.
+                    (_artifact_dir(tr["task_id"]) / "input_intake.json").write_text(
+                        json.dumps(intake, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                    tr = self.db.get_task_run(tr["task_id"]) or tr
+        except Exception as e:
+            logger.warning("intake classification failed: %s", e)
+
         return tr
 
     def get_task(self, task_id: str) -> Optional[TaskRunResult]:
@@ -156,12 +176,20 @@ class TaskEngine:
             if not self.research:
                 raise RuntimeError("Research pipeline not configured")
             inputs = tr.get("artifacts_json") or {}
+            intake = (inputs.get("input_intake") or {}) if isinstance(inputs, dict) else {}
+            input_type = str(intake.get("input_type") or "") or None
+            dominant = intake.get("details", {}).get("dominant_file") if isinstance(intake.get("details"), dict) else None
+            dataset_path = None
+            if isinstance(dominant, dict) and dominant.get("abs_path"):
+                dataset_path = str(dominant.get("abs_path"))
             plan = self.research.plan_steps(
                 ResearchInputs(
                     root_path=str(inputs.get("root_path") or "."),
                     files=inputs.get("files"),
                     question=inputs.get("question"),
                     mode=str(inputs.get("mode") or "research"),
+                    input_type=input_type,
+                    dataset_path=dataset_path,
                 )
             )
             for idx, s in enumerate(plan[: int(tr.get("max_steps") or 25)]):
@@ -387,11 +415,20 @@ class TaskEngine:
                 if (tr.get("task_type") or "agent") == "research":
                     if not self.research:
                         raise RuntimeError("Research pipeline not configured")
+                    aj = tr.get("artifacts_json") or {}
+                    intake = (aj.get("input_intake") or {}) if isinstance(aj, dict) else {}
+                    input_type = str(intake.get("input_type") or "") or None
+                    dominant = intake.get("details", {}).get("dominant_file") if isinstance(intake.get("details"), dict) else None
+                    dataset_path = None
+                    if isinstance(dominant, dict) and dominant.get("abs_path"):
+                        dataset_path = str(dominant.get("abs_path"))
                     inputs = ResearchInputs(
-                        root_path=str((tr.get("artifacts_json") or {}).get("root_path") or "."),
-                        files=(tr.get("artifacts_json") or {}).get("files"),
-                        question=(tr.get("artifacts_json") or {}).get("question"),
-                        mode=str((tr.get("artifacts_json") or {}).get("mode") or "research"),
+                        root_path=str(aj.get("root_path") or "."),
+                        files=aj.get("files"),
+                        question=aj.get("question"),
+                        mode=str(aj.get("mode") or "research"),
+                        input_type=input_type,
+                        dataset_path=dataset_path,
                     )
 
                     step_type = step.get("step_type") or "generic"
@@ -424,21 +461,63 @@ class TaskEngine:
                         self.db.create_task_steps(task_id, to_insert)
                         self.db.update_task_step(step["step_id"], {"status": "completed", "output_summary": f"Expanded {len(to_insert)} file steps."})
                         advances += 1
+                    elif step_type == "expand_dataset_steps":
+                        # Expand dataset batch steps after dataset_profile has written plan metadata.
+                        paths = self.research._paths(task_id)  # intentional internal reuse
+                        if not paths.get("dataset_profile") or not paths["dataset_profile"].exists():
+                            raise RuntimeError("dataset_profile.json missing; cannot expand dataset steps")
+                        prof = json.loads(paths["dataset_profile"].read_text(encoding="utf-8"))
+                        batches = prof.get("planned_batches") or []
+                        to_insert = []
+                        base_index = current_idx + 1
+                        for i, b in enumerate(batches):
+                            if base_index + i >= max_steps - 3:  # leave room for synthesis + theme_extraction + final_report
+                                break
+                            to_insert.append(
+                                {
+                                    "step_index": base_index + i,
+                                    "step_type": f"dataset_batch:{int(b.get('batch_index', i))}",
+                                    "instruction": f"Summarize dataset batch {int(b.get('batch_index', i))}",
+                                    "status": "pending",
+                                }
+                            )
+                        later = [s for s in steps if int(s["step_index"]) > current_idx]
+                        shift = len(to_insert)
+                        for s in later:
+                            self.db.update_task_step(s["step_id"], {"step_index": int(s["step_index"]) + shift})
+                        self.db.create_task_steps(task_id, to_insert)
+                        self.db.update_task_step(step["step_id"], {"status": "completed", "output_summary": f"Expanded {len(to_insert)} dataset batch steps."})
+                        advances += 1
                     else:
                         out = await self.research.run_step(task_id, step, inputs)
                         ok = bool(out.get("ok"))
                         if not ok:
                             raise RuntimeError(str(out.get("error") or "research_step_failed"))
-                        self.db.update_task_step(
-                            step["step_id"],
-                            {
-                                "status": "completed",
-                                "output_summary": json.dumps(out, ensure_ascii=False)[:4000],
-                                "verifier_result": json.dumps({"ok": True}),
-                                "artifact_path": out.get("artifact_path") or out.get("final_report") or out.get("research_brief"),
-                            },
-                        )
-                        advances += 1
+
+                        # If the pipeline indicates partial completion, keep the step pending and
+                        # return control quickly. This prevents long blocking continues on huge inputs.
+                        if out.get("partial") is True:
+                            self.db.update_task_step(
+                                step["step_id"],
+                                {
+                                    "status": "pending",
+                                    "output_summary": json.dumps(out, ensure_ascii=False)[:4000],
+                                    "verifier_result": json.dumps({"ok": True, "partial": True}),
+                                },
+                            )
+                            advance_index = False
+                            advances += 1
+                        else:
+                            self.db.update_task_step(
+                                step["step_id"],
+                                {
+                                    "status": "completed",
+                                    "output_summary": json.dumps(out, ensure_ascii=False)[:4000],
+                                    "verifier_result": json.dumps({"ok": True}),
+                                    "artifact_path": out.get("artifact_path") or out.get("final_report") or out.get("research_brief"),
+                                },
+                            )
+                            advances += 1
                 elif (tr.get("task_type") or "agent") == "repo_audit":
                     if not self.repo_audit:
                         raise RuntimeError("Repo audit pipeline not configured")
