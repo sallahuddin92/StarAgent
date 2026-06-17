@@ -1978,6 +1978,19 @@ async def get_workflow_run_state_endpoint(run_id: str, authorization: Optional[s
         "model_selections": models
     }
 
+@app.get("/v1/workflows/{run_id}/report")
+async def get_workflow_report(run_id: str, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    wf_dir = Path(".runtime") / "workflows" / run_id
+    report_file = wf_dir / "final_report.md"
+    if not report_file.exists():
+        raise HTTPException(status_code=404, detail=f"Final report for run '{run_id}' not found.")
+    try:
+        report_content = report_file.read_text(encoding="utf-8")
+        return {"report": report_content}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read final report: {e}")
+
 @app.get("/v1/workflows/{run_id}/gates")
 async def get_workflow_run_gates(run_id: str, authorization: Optional[str] = Header(default=None)):
     _validate_api_key(authorization)

@@ -20,9 +20,12 @@ BUILTIN_TOOL_METADATA = {
     "run_command": {"provider": "local", "type": "shell", "read_write_destructive": "destructive", "stage_allowlist": ["execute", "verify"]},
     
     "web_search": {"provider": "local", "type": "research", "read_write_destructive": "read"},
+    "search_web": {"provider": "local", "type": "research", "read_write_destructive": "read"},
     "web_research": {"provider": "local", "type": "research", "read_write_destructive": "read"},
     "staragent_deep_research": {"provider": "local", "type": "research", "read_write_destructive": "read"},
     "wikipedia_search": {"provider": "local", "type": "research", "read_write_destructive": "read"},
+    "read_url_content": {"provider": "local", "type": "research", "read_write_destructive": "read"},
+    "read_browser_page": {"provider": "local", "type": "research", "read_write_destructive": "read"},
     
     "get_location": {"provider": "local", "type": "knowledge", "read_write_destructive": "read"},
     "semantic_search": {"provider": "local", "type": "knowledge", "read_write_destructive": "read"},
@@ -266,6 +269,52 @@ class ToolRegistry:
                         "max_results": {"type": "integer", "default": 3}
                     },
                     "required": ["query"]
+                }
+            }
+        })
+
+        self.register("search_web", self.web_search, {
+            "type": "function",
+            "function": {
+                "name": "search_web",
+                "description": "Search the web for up-to-date information.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The search query"},
+                        "max_results": {"type": "integer", "default": 5}
+                    },
+                    "required": ["query"]
+                }
+            }
+        })
+
+        self.register("read_url_content", self.read_url_content_handler, {
+            "type": "function",
+            "function": {
+                "name": "read_url_content",
+                "description": "Fetch content from a URL via HTTP request.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "URL to read content from"}
+                    },
+                    "required": ["url"]
+                }
+            }
+        })
+
+        self.register("read_browser_page", self.read_url_content_handler, {
+            "type": "function",
+            "function": {
+                "name": "read_browser_page",
+                "description": "Render a webpage in a browser and read its contents.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "URL to read content from"}
+                    },
+                    "required": ["url"]
                 }
             }
         })
@@ -874,3 +923,26 @@ class ToolRegistry:
             return result
         except Exception as e:
             return {"url": url, "text": None, "error": str(e)}
+
+    async def read_url_content_handler(self, url: str, **kwargs) -> str:
+        """Fetch URL content and return extracted text."""
+        if not self.web_extractor:
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.get(url, follow_redirects=True)
+                    resp.raise_for_status()
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    return f"### CONTENT FROM {url}\n\n{soup.get_text()[:4000]}"
+            except Exception as e:
+                return f"Failed to extract URL content: {e}"
+        
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                res = await self._fetch_and_extract(client, url)
+                if res.get("error"):
+                    return f"Error extracting content: {res['error']}"
+                return f"### CONTENT FROM {url}\n\n{res.get('text', '')}"
+        except Exception as e:
+            return f"Failed to extract URL content: {e}"

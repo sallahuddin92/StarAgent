@@ -975,15 +975,18 @@ class MacAgentClient:
         return {"ok": ok, "results": results}
 
     def workflows_list(self) -> Dict[str, Any]:
-        r = self._http.get(f"{self.v1_base_url}/workflows")
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/workflows", headers=headers)
         return r.json()
 
     def workflow_inspect(self, name: str) -> Dict[str, Any]:
-        r = self._http.get(f"{self.v1_base_url}/workflows/{name}")
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/workflows/{name}", headers=headers)
         return r.json()
 
     def workflow_graph(self, name: str) -> Dict[str, Any]:
-        r = self._http.get(f"{self.v1_base_url}/workflows/{name}/graph")
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/workflows/{name}/graph", headers=headers)
         return r.json()
 
     def workflow_run(
@@ -1001,53 +1004,70 @@ class MacAgentClient:
             "goal": goal,
             "definition_of_done": definition_of_done
         }
-        r = self._http.post(f"{self.v1_base_url}/workflows/run", json=payload)
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        r = self._http.post(f"{self.v1_base_url}/workflows/run", json=payload, headers=headers)
         return r.json()
 
     def workflow_create(self, name: str, description: str = "") -> Dict[str, Any]:
         payload = {"name": name, "description": description}
-        r = self._http.post(f"{self.v1_base_url}/workflows/create", json=payload)
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        r = self._http.post(f"{self.v1_base_url}/workflows/create", json=payload, headers=headers)
         return r.json()
 
     def workflow_resume(self, task_id: str, stage: Optional[str] = None) -> Dict[str, Any]:
         payload = {"stage": stage}
-        r = self._http.post(f"{self.v1_base_url}/workflows/{task_id}/resume", json=payload)
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        r = self._http.post(f"{self.v1_base_url}/workflows/{task_id}/resume", json=payload, headers=headers)
         return r.json()
 
     def workflow_checkpoints(self, task_id: str) -> Dict[str, Any]:
-        r = self._http.get(f"{self.v1_base_url}/workflows/{task_id}/checkpoints")
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/workflows/{task_id}/checkpoints", headers=headers)
         return r.json()
 
     def workflow_runs(self) -> Dict[str, Any]:
-        r = self._http.get(f"{self.v1_base_url}/workflows/runs")
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/workflows/runs", headers=headers)
         return r.json()
 
     def workflow_run_status(self, run_id: str) -> Dict[str, Any]:
-        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/status")
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/status", headers=headers)
         return r.json()
 
     def workflow_run_trace(self, run_id: str) -> Dict[str, Any]:
-        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/trace")
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/trace", headers=headers)
         return r.json()
 
     def workflow_run_state(self, run_id: str) -> Dict[str, Any]:
-        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/state")
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/state", headers=headers)
         return r.json()
 
     def workflow_run_gates(self, run_id: str) -> Dict[str, Any]:
-        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/gates")
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/gates", headers=headers)
         return r.json()
 
     def workflow_run_approve(self, run_id: str, stage: Optional[str] = None) -> Dict[str, Any]:
         payload = {"stage": stage}
-        r = self._http.post(f"{self.v1_base_url}/workflows/{run_id}/approve", json=payload)
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        r = self._http.post(f"{self.v1_base_url}/workflows/{run_id}/approve", json=payload, headers=headers)
         return r.json()
 
     def workflow_run_reject(self, run_id: str, stage: Optional[str] = None) -> Dict[str, Any]:
         payload = {"stage": stage}
-        r = self._http.post(f"{self.v1_base_url}/workflows/{run_id}/reject", json=payload)
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        r = self._http.post(f"{self.v1_base_url}/workflows/{run_id}/reject", json=payload, headers=headers)
+        return r.json()
+
+    def workflow_run_report(self, run_id: str) -> Dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/report", headers=headers)
         return r.json()
 
     def workflow_explain(self, workflow_name: str) -> Dict[str, Any]:
-        r = self._http.get(f"{self.v1_base_url}/workflows/{workflow_name}/explain")
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/workflows/{workflow_name}/explain", headers=headers)
         return r.json()

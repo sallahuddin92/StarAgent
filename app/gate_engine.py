@@ -109,8 +109,15 @@ class GateEngine:
         if not paths:
             return "skipped", "No paths specified to check."
 
-        missing = []
+        run_id = context.get("run_id") or ""
+        formatted_paths = []
         for p in paths:
+            if "{run_id}" in p:
+                p = p.format(run_id=run_id)
+            formatted_paths.append(p)
+
+        missing = []
+        for p in formatted_paths:
             # Check filesystem
             full_path = self._get_workspace_path(p)
             if not full_path.exists():
@@ -121,7 +128,7 @@ class GateEngine:
 
         if missing:
             return "fail", f"Missing files: {', '.join(missing)}"
-        return "pass", f"All required files exist: {', '.join(paths)}"
+        return "pass", f"All required files exist: {', '.join(formatted_paths)}"
 
     def _gate_command_success(self, args: Dict[str, Any], context: Dict[str, Any]) -> Tuple[str, str]:
         cmd = args.get("command")
@@ -467,3 +474,122 @@ class GateEngine:
         if level == "optional":
             return "warning", f"Human approval requested (optional) for stage '{stage_name}'."
         return "fail", f"Human approval required for stage '{stage_name}' but not yet granted."
+
+    def _gate_source_count_min(self, args: Dict[str, Any], context: Dict[str, Any]) -> Tuple[str, str]:
+        run_id = context.get("run_id") or ""
+        min_count = args.get("min_count", 3)
+        sources_path = self._get_workspace_path(f".runtime/workflows/{run_id}/sources.json")
+        if not sources_path.exists():
+            return "fail", f"sources.json does not exist at {sources_path}"
+        try:
+            import json
+            sources = json.loads(sources_path.read_text(encoding="utf-8"))
+            if not isinstance(sources, list):
+                return "fail", "sources.json is not a JSON list"
+            count = len(sources)
+            if count >= min_count:
+                return "pass", f"Found {count} sources (minimum required: {min_count})."
+            return "fail", f"Found {count} sources, which is below minimum required {min_count}."
+        except Exception as e:
+            return "fail", f"Failed to read/parse sources.json: {e}"
+
+    def _gate_source_diversity(self, args: Dict[str, Any], context: Dict[str, Any]) -> Tuple[str, str]:
+        run_id = context.get("run_id") or ""
+        min_domains = args.get("min_domains", 2)
+        sources_path = self._get_workspace_path(f".runtime/workflows/{run_id}/sources.json")
+        if not sources_path.exists():
+            return "fail", f"sources.json does not exist at {sources_path}"
+        try:
+            import json
+            from urllib.parse import urlparse
+            sources = json.loads(sources_path.read_text(encoding="utf-8"))
+            if not isinstance(sources, list):
+                return "fail", "sources.json is not a JSON list"
+            domains = set()
+            for src in sources:
+                url = src.get("url")
+                if url:
+                    loc = urlparse(url).netloc
+                    if loc:
+                        domains.add(loc)
+            unique_domains = len(domains)
+            if unique_domains >= min_domains:
+                return "pass", f"Found {unique_domains} unique domains (minimum required: {min_domains})."
+            return "fail", f"Found {unique_domains} unique domains, which is below minimum required {min_domains}."
+        except Exception as e:
+            return "fail", f"Failed to read/parse sources.json: {e}"
+
+    def _gate_contradiction_check(self, args: Dict[str, Any], context: Dict[str, Any]) -> Tuple[str, str]:
+        run_id = context.get("run_id") or ""
+        claims_path = self._get_workspace_path(f".runtime/workflows/{run_id}/claims_matrix.md")
+        if not claims_path.exists():
+            return "fail", f"claims_matrix.md does not exist at {claims_path}"
+        try:
+            content = claims_path.read_text(encoding="utf-8")
+            if not content.strip():
+                return "fail", "claims_matrix.md is empty"
+            if "contradiction" in content.lower() or "conflict" in content.lower() or "matrix" in content.lower():
+                return "pass", "claims_matrix.md has contradiction analysis."
+            return "fail", "claims_matrix.md is missing contradiction/conflict analysis content."
+        except Exception as e:
+            return "fail", f"Failed to read claims_matrix.md: {e}"
+
+    def _gate_no_unsourced_claims(self, args: Dict[str, Any], context: Dict[str, Any]) -> Tuple[str, str]:
+        run_id = context.get("run_id") or ""
+        audit_path = self._get_workspace_path(f".runtime/workflows/{run_id}/citation_audit.md")
+        if not audit_path.exists():
+            return "fail", f"citation_audit.md does not exist at {audit_path}"
+        try:
+            content = audit_path.read_text(encoding="utf-8")
+            if not content.strip():
+                return "fail", "citation_audit.md is empty"
+            lines = content.splitlines()
+            unresolved_found = False
+            for line in lines:
+                if "unresolved" in line.lower():
+                    unresolved_found = True
+                    if "none" not in line.lower() and ":" in line and line.split(":", 1)[1].strip() not in {"", "."}:
+                        return "fail", f"Unresolved unsourced claims found in citation audit: {line}"
+            return "pass", "No unsourced claims detected."
+        except Exception as e:
+            return "fail", f"Failed to read citation_audit.md: {e}"
+
+    def _gate_final_report_exists(self, args: Dict[str, Any], context: Dict[str, Any]) -> Tuple[str, str]:
+        run_id = context.get("run_id") or ""
+        report_path = self._get_workspace_path(f".runtime/workflows/{run_id}/final_report.md")
+        if report_path.exists() and report_path.stat().st_size > 0:
+            return "pass", "final_report.md exists and is non-empty."
+        return "fail", f"final_report.md does not exist or is empty at {report_path}"
+
+    def _gate_citation_required(self, args: Dict[str, Any], context: Dict[str, Any]) -> Tuple[str, str]:
+        run_id = context.get("run_id") or ""
+        min_citations = args.get("min_citations", 3)
+        report_path = self._get_workspace_path(f".runtime/workflows/{run_id}/final_report.md")
+        if not report_path.exists():
+            return "fail", f"final_report.md does not exist at {report_path}"
+        try:
+            content = report_path.read_text(encoding="utf-8")
+            found = re.findall(r"\[[a-zA-Z0-9_\-\.\s]+\]", content)
+            valid_citations = [c for c in found if c.lower() not in {"[ ]", "[x]", "[/]"}]
+            unique_citations = set(valid_citations)
+            if len(unique_citations) >= min_citations:
+                return "pass", f"Found {len(unique_citations)} unique citations in report (minimum required: {min_citations})."
+            return "fail", f"Found {len(unique_citations)} unique citations, which is below minimum required {min_citations}."
+        except Exception as e:
+            return "fail", f"Failed to read/parse final_report.md: {e}"
+
+    def _gate_quote_limit(self, args: Dict[str, Any], context: Dict[str, Any]) -> Tuple[str, str]:
+        run_id = context.get("run_id") or ""
+        max_quotes = args.get("max_quotes", 10)
+        report_path = self._get_workspace_path(f".runtime/workflows/{run_id}/final_report.md")
+        if not report_path.exists():
+            return "fail", f"final_report.md does not exist at {report_path}"
+        try:
+            content = report_path.read_text(encoding="utf-8")
+            quotes = re.findall(r'"([^"\n]+)"', content)
+            count = len(quotes)
+            if count <= max_quotes:
+                return "pass", f"Found {count} direct quotes (maximum allowed: {max_quotes})."
+            return "fail", f"Found {count} direct quotes, which exceeds the limit of {max_quotes}."
+        except Exception as e:
+            return "fail", f"Failed to read final_report.md: {e}"

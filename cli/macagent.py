@@ -497,6 +497,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("approve", help="Approve pending action (send yes)")
     sub.add_parser("reject", help="Reject pending action (send no)")
     sub.add_parser("continue", help="Continue pending partial task (send continue)")
+    sub.add_parser("tui", help="Start the Terminal UI Dashboard")
 
     sub.add_parser("status", help="Print health/models/context")
     sub.add_parser("rollback", help="Best-effort rollback via agent path")
@@ -645,6 +646,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_wf = workflow_sub.add_parser("run", help="Run a workflow task")
     run_wf.add_argument("name", help="Workflow name")
     run_wf.add_argument("--goal", default="Run workflow task", help="User target/goal description")
+    run_wf.add_argument("--question", help="The research question (sets the goal for deep research)")
     run_wf.add_argument("--dod", help="Definition of done")
 
     create_wf = workflow_sub.add_parser("create", help="Create a custom workflow")
@@ -662,6 +664,9 @@ def build_parser() -> argparse.ArgumentParser:
     graph_wf.add_argument("name", help="Workflow name")
 
     workflow_sub.add_parser("runs", help="List all workflow runs")
+
+    report_wf = workflow_sub.add_parser("report", help="Retrieve final report of a workflow run")
+    report_wf.add_argument("run_id", help="Workflow Run/Task ID")
 
     status_wf = workflow_sub.add_parser("status", help="Get status of a workflow run")
     status_wf.add_argument("run_id", help="Workflow Run/Task ID")
@@ -700,6 +705,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     research_status = research_sub.add_parser("status", help="Get research task status")
     research_status.add_argument("task_id", nargs="?", help="Task id (default: last task)")
+
+    research_deep = research_sub.add_parser("deep", help="Run a deep research ICM workflow task")
+    research_deep.add_argument("question", help="The deep research question/topic")
 
     docs = sub.add_parser("docs", help="Local documentation knowledge base")
     docs_sub = docs.add_subparsers(dest="docs_cmd", required=True)
@@ -1360,6 +1368,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             res = client.continue_task(project_id=ctx["project_id"], conversation_id=ctx["conversation_id"], model=args.model or None)
             _print_result(res, as_json=args.as_json)
             return 0
+        if args.cmd == "tui":
+            from cli.tui import run_tui_dashboard
+            return run_tui_dashboard(client)
         if args.cmd == "rollback":
             res = client.rollback(project_id=ctx["project_id"], conversation_id=ctx["conversation_id"], model=args.model or None)
             _print_result(res, as_json=args.as_json)
@@ -1781,11 +1792,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                 return 0
 
             if args.workflow_cmd == "run":
+                goal = args.question if getattr(args, "question", None) else args.goal
                 out = client.workflow_run(
                     name=args.name,
                     project_id=ctx["project_id"],
                     conversation_id=ctx["conversation_id"],
-                    goal=args.goal,
+                    goal=goal,
                     definition_of_done=args.dod
                 )
                 task_id = out.get("task_id")
@@ -1925,6 +1937,18 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(out.get("message") or f"Rejected stage for run {args.run_id}")
                 return 0
 
+            if args.workflow_cmd == "report":
+                out = client.workflow_run_report(args.run_id)
+                if getattr(args, "as_json", False):
+                    print(json.dumps(out, ensure_ascii=False, indent=2))
+                    return 0
+                report = out.get("report")
+                if report:
+                    print(report)
+                else:
+                    print(f"No report found for run {args.run_id}")
+                return 0
+
             if args.workflow_cmd == "explain":
                 out = client.workflow_explain(args.name)
                 if getattr(args, "as_json", False):
@@ -1958,6 +1982,26 @@ def main(argv: Optional[list[str]] = None) -> int:
                 out = client.task_status(str(tid))
                 print(json.dumps(out, ensure_ascii=False, indent=2))
                 return 0
+            if args.research_cmd == "deep":
+                out = client.workflow_run(
+                    name="deep_research",
+                    project_id=ctx["project_id"],
+                    conversation_id=ctx["conversation_id"],
+                    goal=args.question,
+                    definition_of_done="Deep research report generated and verified."
+                )
+                task_id = out.get("task_id")
+                if task_id:
+                    _remember_last_task(task_id)
+                if getattr(args, "as_json", False):
+                    print(json.dumps(out, ensure_ascii=False, indent=2))
+                    return 0
+                print(f"Started deep research workflow run: {task_id}")
+                task_data = out.get("task") or {}
+                print(f"Status: {task_data.get('status')}")
+                print(f"Summary: {task_data.get('final_summary') or 'Execution started.'}")
+                return 0
+
             raise SystemExit(f"unknown research command: {args.research_cmd}")
 
         if args.cmd == "docs":

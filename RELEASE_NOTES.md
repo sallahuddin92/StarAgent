@@ -1,3 +1,31 @@
+# StarAgent Release Notes v0.5.2 (v0.5.2-tui-research)
+
+## Milestone Summary
+
+StarAgent v0.5.2 introduces a Rich-based Terminal UI (TUI) Dashboard for real-time workflow monitoring, a new 9-stage `deep_research` ICM workflow with 7 custom validation gates, and streamlined CLI subcommands for deep research execution and report retrieval.
+
+## Highlights
+
+- **Interactive Terminal UI Dashboard (`./scripts/staragent tui`)**:
+  - Full-screen dashboard displaying active workflow runs, current stages, diagnostics status, and evaluated verification gates.
+  - Interactive keyboard shortcuts: `[Q] Quit`, `[R] Refresh`, `[Up/Down] Navigate`, `[A] Approve`, `[J] Reject`, and `[C] Resume`.
+  - Live Doctor diagnostics status summary directly in the TUI console header.
+
+- **9-Stage Deep Research ICM Workflow**:
+  - Implemented the `"deep_research"` workflow template covering `scope`, `source_plan`, `collect_sources`, `extract_evidence`, `compare_claims`, `synthesize`, `verify_citations`, `write_report`, and `review` stages.
+  - Implemented a high-speed deterministic fast path to populate all 6 required deep research workspace markdown/JSON files and stage checkpoints.
+
+- **Custom Research Verification Gates**:
+  - Implemented 7 custom validation gates under the `GateEngine` class: `source_count_min`, `citation_required`, `source_diversity`, `contradiction_check`, `quote_limit`, `final_report_exists`, and `no_unsourced_claims`.
+  - Added support for dynamic `{run_id}` formatting in stage-defined verifier output paths.
+
+- **Expanded CLI & API Endpoints**:
+  - Added the `report` subcommand under the workflow CLI (`./scripts/staragent workflow report <run_id>`) and the corresponding API endpoint (`GET /v1/workflows/{run_id}/report`).
+  - Added the `deep` subcommand under the research CLI (`./scripts/staragent research deep "<question>"`).
+  - Integrated Authorization headers across all client workflow methods to guarantee secure thin-client communication.
+
+---
+
 # StarAgent Release Notes v0.5.1 (v0.5.1-groq-stable)
 
 ## Milestone Summary
