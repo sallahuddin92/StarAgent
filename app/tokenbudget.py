@@ -131,8 +131,8 @@ class TokenBudgetManager:
     
     def __init__(
         self,
-        default_prompt_budget: int = 2000,
-        default_completion_budget: int = 2000
+        default_prompt_budget: int = 1000000,
+        default_completion_budget: int = 1000000
     ):
         self.default_prompt_budget = default_prompt_budget
         self.default_completion_budget = default_completion_budget
@@ -244,8 +244,8 @@ def get_budget_manager() -> TokenBudgetManager:
     """Get or initialize the global budget manager."""
     global _budget_manager
     if _budget_manager is None:
-        default_prompt = int(os.getenv("DEFAULT_PROMPT_TOKENS", "2000"))
-        default_completion = int(os.getenv("DEFAULT_COMPLETION_TOKENS", "2000"))
+        default_prompt = int(os.getenv("DEFAULT_PROMPT_TOKENS", "1000000"))
+        default_completion = int(os.getenv("DEFAULT_COMPLETION_TOKENS", "1000000"))
         _budget_manager = TokenBudgetManager(default_prompt, default_completion)
     return _budget_manager
 

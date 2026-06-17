@@ -12,3 +12,6 @@ staragent-mcp = "mcp.server:main"
 
 [tool.setuptools]
 packages = ["app", "cli", "client", "mcp"]
+
+[tool.pytest.ini_options]
+norecursedirs = ["recovery", "dist", ".venv", "vendor", "scratch", ".runtime"]

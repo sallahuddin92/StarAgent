@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .llm_client import OllamaChatClient, extract_json_object
+from .llm_client import LLMClient, extract_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -549,7 +549,7 @@ class ResearchPipeline:
     artifact files and skips work that has already been completed.
     """
 
-    def __init__(self, llm: OllamaChatClient):
+    def __init__(self, llm: LLMClient):
         self.llm = llm
 
     def plan_steps(self, inputs: ResearchInputs) -> List[Dict[str, Any]]:

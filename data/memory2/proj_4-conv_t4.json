@@ -1,0 +1,19 @@
+{
+  "conversation_id": "conv_t4",
+  "project_id": "proj_4",
+  "project_summary": [
+    "Request 4 completed"
+  ],
+  "decisions": [],
+  "constraints": [],
+  "issues": [],
+  "style_preferences": [],
+  "archive_turns": [],
+  "turn_count": 0,
+  "pending_approval": null,
+  "pending_plan": null,
+  "pending_history": null,
+  "pending_goal": null,
+  "force_research_flag": false,
+  "last_api_error": null
+}

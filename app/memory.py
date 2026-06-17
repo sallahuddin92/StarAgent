@@ -130,7 +130,11 @@ class MemoryStore:
         except Exception as e:
             logger.error(f"Failed to save to JSON: {e}")
 
-    def append_turn(
+    def set_embedding_model(self, model: EmbeddingModel) -> None:
+        """Set the shared embedding model to avoid redundant loads."""
+        self._embedding_model = model
+
+    async def append_turn(
         self,
         state: MemoryState,
         user_text: str,
@@ -158,8 +162,28 @@ class MemoryStore:
                 user_text[:4000],
                 assistant_text[:4000]
             )
+            
+            # GENERATE SEARCHABLE MEMORY ITEM (Semantic Search Support)
+            try:
+                # Use shared embedding model if available
+                model = getattr(self, '_embedding_model', None)
+                if model:
+                    content = f"User: {user_text[:500]}\nAssistant: {assistant_text[:1000]}"
+                    embedding = await model.embed(content)
+                    
+                    self.db.add_memory_item(
+                        state.conversation_id,
+                        state.project_id,
+                        category="conversation",
+                        content=content,
+                        embedding=embedding
+                    )
+                    logger.info(f"Generated searchable memory item with embedding for {state.conversation_id}")
+            except Exception as e:
+                logger.error(f"Failed to generate semantic memory item: {e}")
         
         return state
+
 
     def retrieve_relevant(
         self,
@@ -175,11 +199,25 @@ class MemoryStore:
             # Format semantic search results
             results = []
             for item in retrieved_items[:self.max_retrieved_items]:
-                category = item.category if hasattr(item, 'category') else item.get('category', '')
-                content = item.content if hasattr(item, 'content') else item.get('content', '')
-                score = item.score if hasattr(item, 'score') else item.get('score', 0)
-                results.append(f"{category.upper()}: {content}")
+                # Handle both SQLAlchemy objects and dicts
+                category = ""
+                content = ""
+                conv_id = ""
+                
+                if hasattr(item, 'category'):
+                    category = item.category
+                    content = item.content
+                    conv_id = getattr(item, 'conversation_id', '')
+                else:
+                    category = item.get('category', '')
+                    content = item.get('content', '')
+                    conv_id = item.get('conversation_id', '')
+
+                is_global = not conv_id or conv_id in ("", "global")
+                scope_label = "[GLOBAL]" if is_global else "[LOCAL]"
+                results.append(f"{scope_label} {category.upper()}: {content}")
             return results
+
         
         # Fallback to heuristic matching
         return self._heuristic_retrieve(state, query)

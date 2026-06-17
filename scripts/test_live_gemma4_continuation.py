@@ -2,7 +2,10 @@ import requests
 import json
 import time
 
-PROXY_URL = "http://127.0.0.1:8081"
+import os
+
+PORT = os.environ.get("PORT") or "8095"
+PROXY_URL = os.environ.get("STARAGENT_HTTP_URL") or os.environ.get("MACAGENT_HTTP_URL") or f"http://127.0.0.1:{PORT}"
 AUTH_HEADER = {"Authorization": "Bearer local-dev-key", "Content-Type": "application/json"}
 
 def test_continuation_fidelity():

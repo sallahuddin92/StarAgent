@@ -32,14 +32,57 @@ def _safe_stat(p: Path) -> Optional[os.stat_result]:
         return None
 
 
-def _looks_like_repo(root: Path) -> bool:
-    # Cheap heuristics: avoid deep reads.
+def _repo_metadata(root: Path) -> Dict[str, Any]:
+    meta = {
+        "is_repo": False,
+        "language": "unknown",
+        "package_manager": "unknown",
+        "test_command": "unknown",
+        "app_entry_points": [],
+        "available_docs": []
+    }
+    
     if (root / ".git").exists():
-        return True
-    for marker in ("pyproject.toml", "setup.py", "requirements.txt", "package.json", "Cargo.toml", "go.mod"):
-        if (root / marker).exists():
-            return True
-    return False
+        meta["is_repo"] = True
+
+    # Detect package manager & language
+    if (root / "package.json").exists():
+        meta["is_repo"] = True
+        meta["language"] = "JavaScript/TypeScript"
+        meta["package_manager"] = "npm/yarn"
+        meta["test_command"] = "npm test"
+        if (root / "index.js").exists(): meta["app_entry_points"].append("index.js")
+        if (root / "src/index.js").exists(): meta["app_entry_points"].append("src/index.js")
+    
+    if (root / "requirements.txt").exists() or (root / "setup.py").exists() or (root / "pyproject.toml").exists():
+        meta["is_repo"] = True
+        meta["language"] = "Python"
+        meta["package_manager"] = "pip/poetry"
+        meta["test_command"] = "pytest"
+        if (root / "main.py").exists(): meta["app_entry_points"].append("main.py")
+        if (root / "app.py").exists(): meta["app_entry_points"].append("app.py")
+
+    if (root / "Cargo.toml").exists():
+        meta["is_repo"] = True
+        meta["language"] = "Rust"
+        meta["package_manager"] = "cargo"
+        meta["test_command"] = "cargo test"
+        if (root / "src/main.rs").exists(): meta["app_entry_points"].append("src/main.rs")
+
+    if (root / "go.mod").exists():
+        meta["is_repo"] = True
+        meta["language"] = "Go"
+        meta["package_manager"] = "go modules"
+        meta["test_command"] = "go test"
+        if (root / "main.go").exists(): meta["app_entry_points"].append("main.go")
+
+    # Docs
+    if (root / "README.md").exists():
+        meta["available_docs"].append("README.md")
+    if (root / "docs").exists() and (root / "docs").is_dir():
+        meta["available_docs"].append("docs/")
+
+    return meta
 
 
 def _classify_json_file(path: Path, *, sample_bytes: int = 512 * 1024) -> Dict[str, Any]:
@@ -162,7 +205,11 @@ def classify_input(
         )
 
     details["is_dir"] = True
-    details["looks_like_repo"] = _looks_like_repo(p)
+    
+    repo_meta = _repo_metadata(p)
+    details["looks_like_repo"] = repo_meta["is_repo"]
+    details["repo_metadata"] = repo_meta
+    details["risk_level"] = "low" # Default risk level
 
     file_count = 0
     total_bytes = 0

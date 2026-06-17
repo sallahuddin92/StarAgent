@@ -9,3 +9,5 @@ numpy==1.26.4
 tiktoken==0.7.0
 aiofiles==23.2.1
 tenacity==8.2.3
+beautifulsoup4
+pypdf

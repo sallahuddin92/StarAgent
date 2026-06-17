@@ -18,6 +18,7 @@ from .research_mode import ResearchPipeline, ResearchInputs
 from .repo_audit import RepoAuditPipeline, RepoAuditInputs
 from .issue_triage import IssueTriagePipeline, IssueTriageInputs
 from .writing_profile import WritingPipeline, WritingInputs
+from .artifact_registry import task_conventions
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,20 @@ def _now() -> float:
 
 def _artifact_dir(task_id: str) -> Path:
     return Path(".runtime") / "tasks" / task_id
+
+
+def _safe_read_text(path: Path, *, max_bytes: int = 2_000_000) -> Optional[str]:
+    try:
+        if not path.exists() or not path.is_file():
+            return None
+        if int(path.stat().st_size) > max_bytes:
+            return None
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        try:
+            return path.read_text(errors="ignore")
+        except Exception:
+            return None
 
 
 @dataclass
@@ -103,9 +118,67 @@ class TaskEngine:
             return out.lower().startswith("successfully wrote to ")
         return True
 
+    def _store_task_result_snapshot(self, tr: Dict[str, Any], steps: List[Dict[str, Any]]) -> Dict[str, Any]:
+        task_id = str(tr.get("task_id") or "")
+        artifacts_json = tr.get("artifacts_json") or {}
+        conv = task_conventions(tr.get("task_type"), artifacts_json=artifacts_json)
+        task_dir = _artifact_dir(task_id)
+
+        primary_report = None
+        if conv.primary:
+            primary_report = _safe_read_text(task_dir / conv.primary)
+
+        files: List[Dict[str, Any]] = []
+        if task_dir.exists():
+            for p in sorted(task_dir.glob("*")):
+                if not p.is_file():
+                    continue
+                try:
+                    size = int(p.stat().st_size)
+                except Exception:
+                    size = None
+                files.append(
+                    {
+                        "name": p.name,
+                        "path": str(p),
+                        "size_bytes": size,
+                        "is_primary": bool(conv.primary and p.name == conv.primary),
+                    }
+                )
+
+        events = []
+        for s in steps:
+            events.append(
+                {
+                    "step_index": s.get("step_index"),
+                    "step_type": s.get("step_type"),
+                    "status": s.get("status"),
+                    "instruction": s.get("instruction"),
+                    "output_summary": s.get("output_summary"),
+                    "artifact_path": s.get("artifact_path"),
+                    "updated_at": s.get("updated_at"),
+                }
+            )
+
+        snapshot = {
+            "task_id": task_id,
+            "status": tr.get("status"),
+            "primary_report": primary_report,
+            "summary": tr.get("final_summary"),
+            "logs": events,
+            "events": events,
+            "artifacts": files,
+            "primary_artifact_name": conv.primary,
+        }
+        artifacts_json = {**artifacts_json, "task_result": snapshot}
+        self.db.update_task_run(task_id, {"artifacts_json": artifacts_json})
+        updated = self.db.get_task_run(task_id)
+        return updated or tr
+
     def create_task(
         self,
         *,
+        task_id: Optional[str] = None,
         project_id: str,
         conversation_id: str,
         task_type: str,
@@ -117,6 +190,7 @@ class TaskEngine:
     ) -> Dict[str, Any]:
         tr = self.db.create_task_run(
             {
+                "task_id": task_id,
                 "project_id": project_id,
                 "conversation_id": conversation_id,
                 "task_type": task_type,
@@ -349,7 +423,8 @@ class TaskEngine:
             summaries = [s.get("output_summary") for s in steps if s.get("output_summary")]
             final = summaries[-1] if summaries else "Task completed."
             self.db.update_task_run(task_id, {"status": "completed", "final_summary": final, "final_verdict": "completed"})
-            return self.db.get_task_run(task_id)
+            completed = self.db.get_task_run(task_id) or {}
+            return self._store_task_result_snapshot(completed, steps)
         return None
 
     async def run(

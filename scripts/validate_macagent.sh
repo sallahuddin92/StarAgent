@@ -25,7 +25,7 @@ echo "[validate] Basic agent-path regression guard: ensure internal fallback str
 resp="$(curl -fsS "http://127.0.0.1:${PORT:-8095}/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${PROXY_API_KEY:-local-dev-key}" \
-  -d "{\"model\":\"${DEFAULT_MODEL:-gemma4:e2b}\",\"stream\":false,\"project_id\":\"validate\",\"conversation_id\":\"validate-1\",\"messages\":[{\"role\":\"user\",\"content\":\"Inspect the app folder and identify the main API entry file.\"}]}")"
+  -d "{\"model\":\"${DEFAULT_MODEL:-gemma4:12b-mlx}\",\"stream\":false,\"project_id\":\"validate\",\"conversation_id\":\"validate-1\",\"messages\":[{\"role\":\"user\",\"content\":\"Inspect the app folder and identify the main API entry file.\"}]}")"
 python3 - <<'PY' <<<"$resp"
 import sys, json
 d=json.load(sys.stdin)

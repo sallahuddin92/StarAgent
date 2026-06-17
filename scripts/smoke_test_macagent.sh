@@ -23,7 +23,7 @@ load_env
 
 PORT="${PORT:-8095}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:${PORT}}"
-MODEL="${DEFAULT_MODEL:-gemma4:e2b}"
+MODEL="${DEFAULT_MODEL:-gemma4:12b-mlx}"
 API_KEY="${PROXY_API_KEY:-local-dev-key}"
 
 AUTH_HEADER="Authorization: Bearer ${API_KEY}"

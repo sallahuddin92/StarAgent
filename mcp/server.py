@@ -241,10 +241,96 @@ class MacAgentMCPServer:
                 annotations=ro,
             ),
             _tool_schema(
+                "staragent_get_file_tree",
+                "Get a recursive file tree listing from the StarAgent server.",
+                {"path": {"type": "string", "description": "Root path"}, "max_depth": {"type": "integer", "default": 3}, **common_props},
+                required=["path"],
+                annotations=ro,
+            ),
+            _tool_schema(
+                "staragent_read_memory",
+                "Search and retrieve context from StarAgent's persistent memory.",
+                {"query": {"type": "string", "description": "Search query"}, "limit": {"type": "integer", "default": 10}, **common_props},
+                required=["query"],
+                annotations=ro,
+            ),
+            _tool_schema(
                 "staragent_release_review",
                 "Preset: release review (stateful; may require approval).",
                 {"path": {"type": "string"}, "goal": {"type": "string"}, "output_path": {"type": "string"}, "max_steps": {"type": "integer"}, "run_now": {"type": "boolean", "default": True}, **common_props},
                 required=[],
+                annotations=wr,
+            ),
+            _tool_schema(
+                "staragent_web_search",
+                "Execute a web search using SearXNG/DuckDuckGo.",
+                {
+                    "query": {"type": "string"},
+                    "max_results": {"type": "integer", "default": 5},
+                    **common_props,
+                },
+                required=["query"],
+                annotations=ro,
+            ),
+            _tool_schema(
+                "staragent_web_fetch",
+                "Fetch a URL and return basic metadata.",
+                {"url": {"type": "string"}, **common_props},
+                required=["url"],
+                annotations=ro,
+            ),
+            _tool_schema(
+                "staragent_web_extract",
+                "Extract clean text from a URL and store it locally.",
+                {"url": {"type": "string"}, **common_props},
+                required=["url"],
+                annotations=wr,
+            ),
+            _tool_schema(
+                "staragent_web_research",
+                "Perform multi-step research on a query and return a grounded report.",
+                {
+                    "query": {"type": "string"},
+                    "max_results": {"type": "integer", "default": 5},
+                    "max_sources": {"type": "integer", "default": 3},
+                    **common_props,
+                },
+                required=["query"],
+                annotations=wr,
+            ),
+            _tool_schema(
+                "staragent_search_sources",
+                "Search locally stored web sources using keywords (FTS5).",
+                {"query": {"type": "string"}, **common_props},
+                required=["query"],
+                annotations=ro,
+            ),
+            _tool_schema(
+                "staragent_source_summary",
+                "Fetch details and summary of a stored source by URL.",
+                {"url": {"type": "string"}, **common_props},
+                required=["url"],
+                annotations=ro,
+            ),
+            _tool_schema(
+                "staragent_semantic_search",
+                "Search locally stored web sources using concept-based vector search (Semantic).",
+                {"query": {"type": "string"}, "limit": {"type": "integer", "default": 5}, **common_props},
+                required=["query"],
+                annotations=ro,
+            ),
+            _tool_schema(
+                "staragent_index_file",
+                "Index a local file (PDF, TXT, MD) into semantic memory.",
+                {"path": {"type": "string", "description": "Absolute path to file"}, **common_props},
+                required=["path"],
+                annotations=wr,
+            ),
+            _tool_schema(
+                "staragent_index_folder",
+                "Recursively index all supported documents in a local folder.",
+                {"path": {"type": "string", "description": "Absolute path to folder"}, **common_props},
+                required=["path"],
                 annotations=wr,
             ),
         ]
@@ -270,6 +356,8 @@ class MacAgentMCPServer:
                 _tool_schema("macagent_task_logs", "Task logs (legacy tool name).", {"task_id": {"type": "string"}, "tail_steps": {"type": "integer", "default": 50}, **common_props}, required=["task_id"]),
                 _tool_schema("macagent_task_artifacts", "Task artifacts list (legacy tool name).", {"task_id": {"type": "string"}, **common_props}, required=["task_id"]),
                 _tool_schema("macagent_task_artifact_preview", "Task artifact preview (legacy tool name).", {"task_id": {"type": "string"}, "artifact_name": {"type": "string"}, "format": {"type": "string", "default": "text"}, "tail_lines": {"type": "integer", "default": 200}, **common_props}, required=["task_id", "artifact_name"]),
+                _tool_schema("macagent_web_search", "Alias for staragent_web_search", {"query": {"type": "string"}}, required=["query"]),
+                _tool_schema("macagent_web_research", "Alias for staragent_web_research", {"query": {"type": "string"}}, required=["query"]),
             ]
         )
         return tools
@@ -402,6 +490,17 @@ class MacAgentMCPServer:
                     run_now=bool(args.get("run_now", True)),
                 )
                 return self._result(status="ok", message="structured_memo", data=out)
+            if name == "staragent_get_file_tree":
+                out = self.client.get_file_tree(str(args.get("path") or ""), max_depth=int(args.get("max_depth") or 3))
+                return self._result(status="ok", message="get_file_tree", data=out)
+            if name == "staragent_read_memory":
+                out = self.client.read_memory(
+                    str(args.get("query") or ""),
+                    limit=int(args.get("limit") or 10),
+                    project_id=project_id,
+                    conversation_id=conversation_id
+                )
+                return self._result(status="ok", message="read_memory", data=out)
             if name == "staragent_release_review":
                 out = self.client.preset_run(
                     "release_review",
@@ -414,6 +513,41 @@ class MacAgentMCPServer:
                     run_now=bool(args.get("run_now", True)),
                 )
                 return self._result(status="ok", message="release_review", data=out)
+            if name in ("staragent_web_search", "macagent_web_search"):
+                out = self.client.web_search(args["query"], max_results=int(args.get("max_results") or 5), project_id=project_id)
+                return self._result(status="ok", message="web_search", data=out)
+            if name == "staragent_web_fetch":
+                out = self.client.web_fetch(args["url"])
+                return self._result(status="ok", message="web_fetch", data=out)
+            if name == "staragent_web_extract":
+                out = self.client.web_extract(args["url"], project_id=project_id)
+                return self._result(status="ok", message="web_extract", data=out)
+            if name in ("staragent_web_research", "macagent_web_research"):
+                out = self.client.web_research(
+                    args["query"], 
+                    max_results=int(args.get("max_results") or 5), 
+                    max_sources=int(args.get("max_sources") or 3),
+                    project_id=project_id
+                )
+                return self._result(status="ok", message="web_research", data=out)
+            if name == "staragent_search_sources":
+                out = self.client.search_sources(args["query"], project_id=project_id)
+                return self._result(status="ok", message="search_sources", data=out)
+            if name == "staragent_source_summary":
+                # For summary, we can just use search_sources or a specific get endpoint if we add it.
+                # For now, search matches exactly on URL if possible or just use a small limit.
+                out = self.client.search_sources(args["url"], project_id=project_id)
+                return self._result(status="ok", message="source_summary", data=out)
+            if name == "staragent_semantic_search":
+                out = self.client.semantic_search(args["query"], limit=int(args.get("limit") or 5))
+                return self._result(status="ok", message="semantic_search", data=out)
+            if name == "staragent_index_file":
+                out = self.client.index_file(args["path"], project_id=project_id)
+                return self._result(status="ok", message="index_file", data=out)
+            if name == "staragent_index_folder":
+                out = self.client.index_folder(args["path"], project_id=project_id)
+                return self._result(status="ok", message="index_folder", data=out)
+
             if name == "macagent_ask":
                 res = self.client.ask(args["prompt"], project_id=project_id, conversation_id=conversation_id, model=model, debug_raw=debug_raw)
                 return self._result(status="ok", message=res.message, agent_status=res.agent_status, raw=res.raw)

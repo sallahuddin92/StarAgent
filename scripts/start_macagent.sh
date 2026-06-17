@@ -36,7 +36,7 @@ load_env
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8095}"
 OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
-DEFAULT_MODEL="${DEFAULT_MODEL:-gemma4:e2b}"
+DEFAULT_MODEL="${DEFAULT_MODEL:-gemma4:12b-mlx}"
 PROXY_API_KEY="${PROXY_API_KEY:-local-dev-key}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
@@ -119,26 +119,62 @@ if ! ollama_tags >/dev/null 2>&1; then
   fi
 fi
 
-if ! ollama_tags >/dev/null 2>&1; then
-  echo "[start] ERROR: Ollama still not reachable at $OLLAMA_BASE_URL." >&2
-  echo "[start] Fix: start Ollama manually, then re-run this script." >&2
-  exit 1
-fi
+# Check if model verification is skipped
+SKIP_CHECK="${STARAGENT_SKIP_MODEL_CHECK:-0}"
+for arg in "$@"; do
+  if [[ "$arg" == "--no-model-check" ]]; then
+    SKIP_CHECK="1"
+  fi
+done
 
-tags_json="$(ollama_tags || true)"
-if [[ -z "$tags_json" ]]; then
-  echo "[start] ERROR: Ollama /api/tags returned empty response." >&2
-  exit 1
-fi
+if [[ "$SKIP_CHECK" == "1" ]]; then
+  echo "[start] Skipping model availability checks (STARAGENT_SKIP_MODEL_CHECK=1)."
+else
+  echo "[start] Verifying model availability..."
+  if ! "$PYTHON" -c '
+import sys
+import os
+sys.path.insert(0, os.getcwd())
+try:
+    from app.model_registry import registry
+except ImportError as e:
+    print(f"[start] WARNING: could not load model registry: {e}")
+    sys.exit(0)
+default_model = sys.argv[1]
+provider = registry.infer_provider(default_model)
+if provider != "ollama":
+    print(f"[start] OK: default model {default_model} is remote ({provider}).")
+    sys.exit(0)
 
-if ! python3 -c 'import sys,json; model=sys.argv[1]; data=json.load(sys.stdin); names=[m.get("name") for m in data.get("models", [])]; sys.exit(0 if model in names else 2)' "$DEFAULT_MODEL" <<<"$tags_json"; then
-  echo "[start] ERROR: Model '$DEFAULT_MODEL' not found in Ollama." >&2
-  echo "[start] Run: ollama list" >&2
-  exit 1
+# Local ollama model check
+try:
+    if registry.is_local_ollama_model_installed(default_model, refresh=True):
+        print(f"[start] OK: local model {default_model} is installed.")
+        sys.exit(0)
+except Exception as e:
+    print(f"[start] WARNING: Ollama reachability check failed: {e}")
+
+# Check if there is any usable fallback model configured (e.g., remote or other installed models)
+has_remote = any(os.getenv(k) for k in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "LONGCAT_API_KEY", "GROQ_API_KEY"])
+if has_remote:
+    print(f"[start] WARNING: local model {default_model} not found in Ollama, but remote fallback keys are configured. Proceeding.")
+    sys.exit(0)
+
+print(f"[start] ERROR: default model {default_model} not found in Ollama, and no remote models configured.")
+sys.exit(1)
+' "$DEFAULT_MODEL"; then
+    echo "[start] ERROR: Startup model validation failed. (Ollama not running or model missing and no remote keys found)" >&2
+    exit 1
+fi
 fi
 
 echo "[start] Starting StarAgent (uvicorn)..."
 export OLLAMA_BASE_URL DEFAULT_MODEL PROXY_API_KEY LOG_LEVEL
+
+RELOAD_ARG=""
+if [[ "${STARAGENT_RELOAD:-0}" == "1" ]]; then
+  RELOAD_ARG="--reload"
+fi
 
 if [[ "${STARAGENT_FOREGROUND:-0}" == "1" ]]; then
   echo "[start] Foreground mode enabled (STARAGENT_FOREGROUND=1)."
@@ -146,10 +182,10 @@ if [[ "${STARAGENT_FOREGROUND:-0}" == "1" ]]; then
   echo "  Health: http://127.0.0.1:${PORT}/health"
   echo "  OpenAI base: http://127.0.0.1:${PORT}/v1"
   echo "  Dashboard: http://127.0.0.1:${PORT}/dashboard"
-  exec "$PYTHON" -m uvicorn app.main:app --host "$HOST" --port "$PORT"
+  exec "$PYTHON" -m uvicorn app.main:app --host "$HOST" --port "$PORT" $RELOAD_ARG
 fi
 
-nohup "$PYTHON" -m uvicorn app.main:app --host "$HOST" --port "$PORT" > "$LOGFILE" 2>&1 &
+nohup "$PYTHON" -m uvicorn app.main:app --host "$HOST" --port "$PORT" $RELOAD_ARG > "$LOGFILE" 2>&1 &
 pid=$!
 echo "$pid" > "$PIDFILE"
 

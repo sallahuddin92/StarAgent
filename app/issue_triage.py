@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .llm_client import OllamaChatClient, extract_json_object
+from .llm_client import LLMClient, extract_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +202,7 @@ class IssueTriagePipeline:
       next_actions.md
     """
 
-    def __init__(self, llm: OllamaChatClient):
+    def __init__(self, llm: LLMClient):
         self.llm = llm
 
     def artifact_dir(self, task_id: str) -> Path:

@@ -15,15 +15,13 @@ import asyncio
 from pathlib import Path
 from typing import Any, Dict, List, Optional, AsyncGenerator, Union
 from datetime import datetime
-import base64
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from .version import __version__
 from .memory import MemoryStore
 from .models import (
     ChatCompletionRequest,
@@ -31,58 +29,46 @@ from .models import (
     ChatCompletionStreamResponse,
     MemoryCompactionRequest,
     ProjectInfo,
-    TaskCreateRequest,
-    TaskActionRequest,
-    ResearchRunRequest,
-    RepoAuditRunRequest,
-    IssueTriageRunRequest,
-    WritingRunRequest,
-    PresetRunRequest,
 )
 from .prompting import build_system_prompt, MemoryCompactor
 from .database import get_db, DatabaseManager
 from .retrieval import SemanticRetriever, EmbeddingModel, retrieve_context
 from .tokenbudget import get_budget_manager, TokenBudgetManager, TokenCounter
+
 from .agent import AgentLoop
 from .planner import Planner
 from .executor import Executor
+from .llm_client import get_llm_client, LLMClient
 from .tools import ToolRegistry
 from .tool_executor import ToolExecutor
 from .approval import ApprovalPolicy
-from .reflection import ReflectionLayer
 from .workspace_state import WorkspaceTracker
-from .routing import determine_execution_route, AGENT_PATH
+from .reflection import ReflectionLayer
+from .routing import determine_execution_route, AGENT_PATH, FAST_PATH
+from .multi_agent import OrchestratorAgent
+from .search_backend import SearchBackend
+from .web_fetcher import WebFetcher
+from .content_extractor import ContentExtractor
+from .source_store import SourceStore
+from .vector_store import VectorStore
+from .document_processor import DocumentProcessor
+from .web_research import WebResearcher
+from .model_profiles import detect_and_log_profile
 from .task_engine import TaskEngine
 from .research_mode import ResearchPipeline
-from .llm_client import OllamaChatClient
 from .repo_audit import RepoAuditPipeline
 from .issue_triage import IssueTriagePipeline
 from .writing_profile import WritingPipeline
-from .presets import PRESETS, PACKS, list_presets, list_preset_packs, default_release_review_output_path
-from .dashboard_ui import render_dashboard_html
+from .task_metadata import task_meta
 from .artifact_registry import task_conventions
-from .task_metadata import (
-    task_meta as build_task_meta,
-    time_meta as _tm_time_meta,
-    primary_artifact as _tm_primary_artifact,
-    dataset_meta as _tm_dataset_meta,
-)
+from .presets import PRESETS, PACKS, list_presets as list_presets_specs, list_preset_packs as list_preset_packs_specs
 
 # Configuration
 load_dotenv()
 
-def _truthy_env(name: str, default: str = "false") -> bool:
-    v = os.getenv(name, default)
-    return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
-
-
-STARAGENT_BRAND_API = _truthy_env("STARAGENT_BRAND_API", "false")
-API_SERVICE_NAME = "staragent-proxy" if STARAGENT_BRAND_API else "macagent-proxy"
-API_OWNED_BY = "staragent" if STARAGENT_BRAND_API else "macagent"
-
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_CHAT_PATH = os.getenv("OLLAMA_CHAT_PATH", "/api/chat")
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemma4:e2b")
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gemma4:12b-mlx")
 MEMORY_DIR = os.getenv("MEMORY_DIR", "./data/memory")
 DATABASE_PATH = os.getenv("DATABASE_PATH", "./data/memory.db")
 PROXY_API_KEY = os.getenv("PROXY_API_KEY", "local-dev-key")
@@ -98,11 +84,25 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger(__name__)
 
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup logic
+    logger.info("MacAgent Proxy v2.0.0 starting up...")
+    detect_and_log_profile()
+    logger.info(f"Ollama: {OLLAMA_BASE_URL}")
+    yield
+    # Shutdown logic
+    logger.info("StarAgent Proxy shutting down...")
+    await _http_client.aclose()
+
 # Initialize FastAPI
 app = FastAPI(
-    title="StarAgent Proxy" if STARAGENT_BRAND_API else "MacAgent Proxy",
-    version=__version__,
-    description="Production-ready local memory proxy for Open WebUI + Ollama"
+    title="MacAgent Proxy",
+    version="2.0.0",
+    description="Production-ready local memory proxy for Open WebUI + Ollama",
+    lifespan=lifespan
 )
 
 # Initialize components
@@ -117,91 +117,268 @@ store = MemoryStore(
 db: DatabaseManager = get_db()
 budget_manager: TokenBudgetManager = get_budget_manager()
 embedding_model: EmbeddingModel = EmbeddingModel(use_ollama=False) if USE_SEMANTIC_SEARCH else None
-compactor: MemoryCompactor = MemoryCompactor(default_model=DEFAULT_MODEL)
+if embedding_model:
+    store.set_embedding_model(embedding_model)
+
+compactor: MemoryCompactor = MemoryCompactor(default_model=None)
 token_counter: TokenCounter = TokenCounter()
 
-# V5 Global Components
-planner: Optional[Planner] = None
-executor: Optional[Executor] = None
-agent_loop: Optional[AgentLoop] = None
-workspace_tracker: WorkspaceTracker = WorkspaceTracker()
-tool_registry: ToolRegistry = ToolRegistry()
-tool_executor: ToolExecutor = ToolExecutor(tool_registry)
-approval_policy: ApprovalPolicy = ApprovalPolicy()
-reflection_layer: ReflectionLayer = ReflectionLayer()
-http_client: Optional[httpx.AsyncClient] = None
-research_pipeline: Optional[ResearchPipeline] = None
-repo_audit_pipeline: Optional[RepoAuditPipeline] = None
-issue_triage_pipeline: Optional[IssueTriagePipeline] = None
-writing_pipeline: Optional[WritingPipeline] = None
-task_engine: Optional[TaskEngine] = None
+
+def get_default_model() -> str:
+    from .model_registry import get_effective_model_config
+    return get_effective_model_config()["model"]
+
 
 # Projects storage (in-memory for now; can be extended to DB)
 _projects: Dict[str, ProjectInfo] = {}
 
+# Initialize Agent System
+_http_client = httpx.AsyncClient(timeout=900.0)
+llm_client = get_llm_client(_http_client)
+# Keep ollama_client for backward compatibility in variable names
+ollama_client = llm_client 
 
-@app.on_event("startup")
-async def startup():
-    """Initialize on startup."""
-    logger.info(f"Starting {'StarAgent' if STARAGENT_BRAND_API else 'MacAgent'} Proxy v{__version__}")
-    logger.info(f"Ollama: {OLLAMA_BASE_URL}")
-    logger.info(f"Database: {DATABASE_PATH}")
-    logger.info(f"Semantic Search: {USE_SEMANTIC_SEARCH}")
-    logger.info(f"Streaming: {USE_STREAMING}")
-    
-    global http_client, planner, executor, agent_loop
-    http_client = httpx.AsyncClient(timeout=180.0)
-    planner = Planner(OLLAMA_BASE_URL, DEFAULT_MODEL, http_client)
-    executor = Executor(
-        OLLAMA_BASE_URL, DEFAULT_MODEL, http_client, 
-        tool_executor, approval_policy, reflection_layer
-    )
-    agent_loop = AgentLoop(planner, executor)
-    logger.info("V5 Agent Runtime initialized.")
+planner = Planner(llm_client=llm_client)
 
-    # Phase 4: Task engine + research pipeline (additive; does not affect /v1/chat behavior).
-    global research_pipeline, repo_audit_pipeline, issue_triage_pipeline, writing_pipeline, task_engine
-    llm = OllamaChatClient(OLLAMA_BASE_URL, OLLAMA_CHAT_PATH, DEFAULT_MODEL, http_client)
-    research_pipeline = ResearchPipeline(llm)
-    repo_audit_pipeline = RepoAuditPipeline(llm)
-    issue_triage_pipeline = IssueTriagePipeline(llm)
-    writing_pipeline = WritingPipeline(llm)
-    task_engine = TaskEngine(
-        db=db,
-        store=store,
-        planner=planner,
-        executor=executor,
-        workspace=workspace_tracker,
-        approval_policy=approval_policy,
-        research=research_pipeline,
-        repo_audit=repo_audit_pipeline,
-        issue_triage=issue_triage_pipeline,
-        writing=writing_pipeline,
-    )
-    logger.info("Phase 4 Task Engine initialized.")
+# Initialize research components
+vector_store = VectorStore(embedding_model)
+source_store = SourceStore(vector_store=vector_store)
+document_processor = DocumentProcessor(vector_store)
+search_backend = SearchBackend()
+web_fetcher = WebFetcher()
+content_extractor = ContentExtractor()
+web_researcher = WebResearcher(llm_client, source_store=source_store)
+
+tool_registry = ToolRegistry(
+    search_backend=search_backend, 
+    web_researcher=web_researcher, 
+    web_extractor=content_extractor,
+    source_store=source_store,
+    document_processor=document_processor
+)
+tool_executor = ToolExecutor(registry=tool_registry)
+approval_policy = ApprovalPolicy()
+reflection_layer = ReflectionLayer(llm_client=llm_client)
+executor = Executor(
+    llm_client=llm_client, 
+    tool_executor=tool_executor, 
+    approval_policy=approval_policy,
+    reflection_layer=reflection_layer
+)
+agent_loop = AgentLoop(planner=planner, executor=executor)
+task_engine = TaskEngine(
+    db=db,
+    store=store,
+    planner=planner,
+    executor=executor,
+    workspace=WorkspaceTracker(),
+    approval_policy=approval_policy,
+    research=ResearchPipeline(llm_client),
+    repo_audit=RepoAuditPipeline(llm_client),
+    issue_triage=IssueTriagePipeline(llm_client),
+    writing=WritingPipeline(llm_client),
+)
+
+from .stage_engine import StageEngine
+from .workflow_engine import WorkflowEngine
+stage_engine = StageEngine(llm=llm_client, executor=executor, db=db)
+workflow_engine = WorkflowEngine(db=db, stage_engine=stage_engine)
 
 
-@app.on_event("shutdown")
-async def shutdown():
-    """Cleanup on shutdown."""
-    if http_client:
-        await http_client.aclose()
-        logger.info("HTTP client closed.")
 
 
 # ============================================================================
 # Health & Info Endpoints
 # ============================================================================
 
+@app.get("/v1/search")
+async def api_web_search(q: str, max_results: int = 5, project_id: str = "default"):
+    results = await search_backend.search(q, max_results=max_results)
+    source_store.log_search(project_id, q, search_backend.backend_type, results)
+    return {"results": results}
+
+@app.post("/v1/web/fetch")
+async def api_web_fetch(url: str):
+    status, content_type, final_url, length = await web_fetcher.fetch(url)
+    return {
+        "status": status,
+        "content_type": content_type,
+        "final_url": final_url,
+        "length": length
+    }
+
+@app.post("/v1/web/extract")
+async def api_web_extract(url: str, project_id: str = "default"):
+    html = source_store.get_cached_html(url)
+    if not html:
+        html = await web_fetcher.fetch_full(url)
+        if html:
+            source_store.set_cached_html(url, html)
+    
+    if not html:
+        raise HTTPException(status_code=404, detail="Failed to fetch content")
+        
+    extracted = content_extractor.extract(html, url)
+    await source_store.save_source(project_id, url, extracted["title"], extracted["text"])
+    return extracted
+
+@app.post("/v1/web/research")
+async def api_web_research(query: str, max_results: int = 5, max_sources: int = 3, project_id: str = "default"):
+    result = await web_researcher.perform_research(
+        project_id=project_id,
+        query=query,
+        max_results=max_results,
+        max_sources=max_sources
+    )
+    return result
+
+@app.get("/v1/sources/search")
+async def api_sources_search(q: str, project_id: str = "default"):
+    results = source_store.search_sources(project_id, q)
+    return {"results": results}
+
+@app.get("/v1/sources/semantic_search")
+async def api_sources_semantic_search(q: str, limit: int = 5):
+    results = await source_store.semantic_search(q, limit=limit)
+    return {"results": results}
+
+@app.post("/v1/documents/index_file")
+async def api_index_file(path: str, project_id: str = "default"):
+    success = await document_processor.index_file(path, project_id)
+    return {"success": success, "path": path}
+
+@app.post("/v1/documents/index_folder")
+async def api_index_folder(path: str, project_id: str = "default"):
+    result = await document_processor.index_folder(path, project_id)
+    return result
+
+# ============================================================================
+# Local Code Documentation Knowledge Base Endpoints
+# ============================================================================
+
+@app.post("/v1/docs/ingest")
+async def api_docs_ingest(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    body = await request.json()
+    path = body.get("path")
+    project_id = body.get("project_id", "default")
+    source_type = body.get("source_type", "project_docs")
+    if not path:
+        raise HTTPException(status_code=400, detail="Missing path")
+    
+    if hasattr(tool_registry, "docs_ingester"):
+        res = tool_registry.docs_ingester.ingest_folder(project_id, path, source_type)
+        return JSONResponse(content=res)
+    else:
+        raise HTTPException(status_code=500, detail="Docs ingester not initialized")
+
+@app.post("/v1/docs/ingest-package")
+async def api_docs_ingest_package(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    body = await request.json()
+    package_name = body.get("package_name")
+    project_id = body.get("project_id", "default")
+    manager = body.get("manager", "pip")
+    if not package_name:
+        raise HTTPException(status_code=400, detail="Missing package_name")
+        
+    if hasattr(tool_registry, "docs_ingester"):
+        res = tool_registry.docs_ingester.ingest_package(project_id, package_name, manager)
+        return JSONResponse(content=res)
+    else:
+        raise HTTPException(status_code=500, detail="Docs ingester not initialized")
+
+@app.post("/v1/docs/search")
+async def api_docs_search_post(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    if not hasattr(tool_registry, "docs_searcher"):
+        raise HTTPException(status_code=500, detail="Docs searcher not initialized")
+
+    body = await request.json()
+    query = body.get("query") or body.get("q")
+    project_id = body.get("project_id", "default")
+    package_name = body.get("package_name")
+    max_results = int(body.get("max_results", 5))
+
+    if not query:
+        raise HTTPException(status_code=400, detail="Missing query")
+
+    results = tool_registry.docs_searcher.search_structured(
+        project_id=project_id,
+        query=query,
+        package_name=package_name,
+        max_results=max_results,
+    )
+    return JSONResponse(content={"results": results, "evidence_count": len(results)})
+
+
+@app.get("/v1/docs/search")
+async def api_docs_search_get(
+    q: str,
+    package_name: Optional[str] = None,
+    project_id: str = "default",
+    max_results: int = 5,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    """Backward-compatible search endpoint; prefer POST /v1/docs/search."""
+    _validate_api_key(authorization)
+    if not hasattr(tool_registry, "docs_searcher"):
+        raise HTTPException(status_code=500, detail="Docs searcher not initialized")
+
+    results = tool_registry.docs_searcher.search_structured(
+        project_id=project_id,
+        query=q,
+        package_name=package_name,
+        max_results=max_results,
+    )
+    return JSONResponse(content={"results": results, "evidence_count": len(results)})
+
+
+@app.post("/v1/docs/ask")
+async def api_docs_ask(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    if not hasattr(tool_registry, "docs_searcher"):
+        raise HTTPException(status_code=500, detail="Docs searcher not initialized")
+
+    body = await request.json()
+    question = body.get("question")
+    project_id = body.get("project_id", "default")
+    package_name = body.get("package_name")
+    max_results = int(body.get("max_results", 5))
+
+    if not question:
+        raise HTTPException(status_code=400, detail="Missing question")
+
+    payload = tool_registry.docs_searcher.ask(
+        project_id=project_id,
+        question=question,
+        package_name=package_name,
+        max_results=max_results,
+    )
+    return JSONResponse(content=payload)
+
 @app.get("/health")
 async def health() -> Dict[str, Any]:
     """Health check endpoint."""
+    from .model_registry import registry
     return {
         "ok": True,
-        "service": API_SERVICE_NAME,
-        "version": __version__,
+        "service": "macagent-proxy",
+        "version": "2.0.0",
         "ollama_base_url": OLLAMA_BASE_URL,
-        "default_model": DEFAULT_MODEL,
+        "default_model": registry.global_default,
         "features": {
             "streaming": USE_STREAMING,
             "semantic_search": USE_SEMANTIC_SEARCH,
@@ -214,33 +391,241 @@ async def health() -> Dict[str, Any]:
 
 @app.get("/v1/models")
 async def list_models() -> Dict[str, Any]:
-    """List available models (OpenAI-compatible)."""
-    # Open WebUI expects an OpenAI-like models list response.
-    model_name = os.getenv("DEFAULT_MODEL") or DEFAULT_MODEL or "gemma4:e2b"
+    """List available models."""
     return {
         "object": "list",
         "data": [
             {
-                "id": model_name,
+                "id": get_default_model(),
                 "object": "model",
-                "owned_by": API_OWNED_BY,
+                "created": int(time.time()),
+                "owned_by": "local",
             }
         ],
     }
 
 
 # ============================================================================
-# Lightweight Dashboard (local UI)
+# Trace & Eval Dashboard Endpoints
 # ============================================================================
 
-@app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard() -> HTMLResponse:
-    return HTMLResponse(render_dashboard_html())
+@app.get("/v1/traces")
+async def get_traces():
+    """List all available trace IDs."""
+    from .trace_logger import list_traces
+    traces = list_traces()
+    return {"traces": traces, "count": len(traces)}
+
+@app.get("/v1/traces/{task_id}")
+async def get_trace(task_id: str):
+    """Get structured trace events for a task."""
+    from .trace_logger import load_trace
+    events = load_trace(task_id)
+    if not events:
+        raise HTTPException(status_code=404, detail=f"No trace found for {task_id}")
+    # Build dashboard-friendly summary
+    roles = list(set(e.get("role", "") for e in events))
+    files_created = [e.get("output_preview", "")[:80] for e in events if e.get("tool_name") == "write_file" and e.get("event_type") == "result"]
+    commands_run = [e.get("output_preview", "")[:120] for e in events if e.get("tool_name") == "run_command" and e.get("event_type") == "result"]
+    verifier_events = [e for e in events if e.get("event_type") == "verifier"]
+    return {
+        "task_id": task_id,
+        "total_events": len(events),
+        "roles": roles,
+        "files_created": files_created,
+        "commands_run": commands_run,
+        "verifier_result": verifier_events[-1] if verifier_events else None,
+        "timeline": events,
+    }
 
 
-@app.get("/dashboard/", response_class=HTMLResponse)
-async def dashboard_slash() -> HTMLResponse:
-    return HTMLResponse(render_dashboard_html())
+# ============================================================================
+# Multi-Agent Orchestration Endpoint
+# ============================================================================
+
+@app.post("/v1/multi-agent/run")
+async def multi_agent_run(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
+    _validate_api_key(authorization)
+    body = await request.json()
+    task = body.get("task", "")
+    project_id = body.get("project_id", "default")
+    conversation_id = body.get("conversation_id", "default")
+    stream = body.get("stream", False)
+
+    if not task:
+        raise HTTPException(status_code=400, detail="Missing 'task' field")
+
+    if stream:
+        return StreamingResponse(
+            _stream_multi_agent(task, project_id, conversation_id),
+            media_type="text/event-stream"
+        )
+    else:
+        try:
+            workflow_name = "feature_build"
+            wf = workflow_engine.inspect_workflow(workflow_name)
+            if not wf:
+                raise HTTPException(status_code=404, detail=f"Workflow '{workflow_name}' not found.")
+                
+            task_id = str(uuid.uuid4())[:8]
+            art = {
+                "workflow_name": workflow_name,
+                "current_stage_index": 0,
+                "variables": {
+                    "project_id": project_id,
+                    "docs_context": ""
+                }
+            }
+            
+            db.create_task_run({
+                "task_id": task_id,
+                "project_id": project_id,
+                "conversation_id": conversation_id,
+                "task_type": "workflow",
+                "user_goal": task,
+                "definition_of_done": "Complete feature_build workflow",
+                "max_steps": len(wf.get("stages") or []),
+                "max_retries": 1,
+                "artifacts_json": art
+            })
+            
+            await workflow_engine.execute_workflow(task_id)
+            
+            from .checkpoint import list_task_checkpoints
+            checkpoints = list_task_checkpoints(task_id)
+            all_artifacts = []
+            for cp in checkpoints:
+                all_artifacts.extend(cp.get("files_produced") or [])
+                
+            final_tr = db.get_task_run(task_id) or {}
+            final_status = final_tr.get("status", "completed")
+            final_summary = final_tr.get("final_summary", "")
+            trace_file_path = os.path.join(".runtime", "traces", f"{task_id}.jsonl")
+            
+            return JSONResponse(content={
+                "status": final_status,
+                "message": final_summary,
+                "artifacts": all_artifacts,
+                "subtask_count": len(wf.get("stages") or []),
+                "task_id": task_id,
+                "trace_file": trace_file_path,
+            })
+        except Exception as e:
+            logger.error(f"Error in multi-agent run: {e}", exc_info=True)
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "failed",
+                    "message": f"Internal server error: {str(e)}",
+                    "artifacts": [],
+                    "subtask_count": 0,
+                    "task_id": "failed",
+                    "trace_file": "",
+                }
+            )
+
+
+async def _stream_multi_agent(task: str, project_id: str, conversation_id: str):
+    """Stream multi-agent orchestration events via SSE."""
+    request_id = f"chatcmpl-{uuid.uuid4().hex}"
+    try:
+        queue = asyncio.Queue()
+        workflow_name = "feature_build"
+        wf = workflow_engine.inspect_workflow(workflow_name)
+        if not wf:
+            err_event = {
+                "id": request_id,
+                "object": "chat.completion.chunk",
+                "choices": [{"delta": {"content": f"[WORKFLOW] [ERROR] Workflow '{workflow_name}' not found.\n"}}]
+            }
+            yield f"data: {json.dumps(err_event)}\n\n"
+            return
+            
+        task_id = str(uuid.uuid4())[:8]
+        art = {
+            "workflow_name": workflow_name,
+            "current_stage_index": 0,
+            "variables": {
+                "project_id": project_id,
+                "docs_context": ""
+            }
+        }
+        
+        db.create_task_run({
+            "task_id": task_id,
+            "project_id": project_id,
+            "conversation_id": conversation_id,
+            "task_type": "workflow",
+            "user_goal": task,
+            "definition_of_done": "Complete feature_build workflow",
+            "max_steps": len(wf.get("stages") or []),
+            "max_retries": 1,
+            "artifacts_json": art
+        })
+
+        async def run_workflow_task():
+            try:
+                result = await workflow_engine.execute_workflow(task_id, progress_queue=queue)
+                await queue.put({"result": result})
+            except Exception as e:
+                logger.error(f"Workflow execution failed: {e}", exc_info=True)
+                await queue.put({"error": str(e)})
+
+        asyncio.create_task(run_workflow_task())
+
+        while True:
+            item = await queue.get()
+            if isinstance(item, str):
+                event = {
+                    "id": request_id,
+                    "object": "chat.completion.chunk",
+                    "choices": [{"delta": {"content": item}}]
+                }
+                yield f"data: {json.dumps(event)}\n\n"
+            elif isinstance(item, dict):
+                if "error" in item:
+                    err_event = {
+                        "id": request_id,
+                        "object": "chat.completion.chunk",
+                        "choices": [{"delta": {"content": f"[WORKFLOW] [ERROR] {item['error']}\n"}}],
+                        "x_agent_status": "failed",
+                    }
+                    yield f"data: {json.dumps(err_event)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    break
+                elif "result" in item:
+                    task_result = item["result"]
+                    status = task_result.get("status", "completed")
+                    
+                    from .checkpoint import list_task_checkpoints
+                    checkpoints = list_task_checkpoints(task_id)
+                    all_artifacts = []
+                    for cp in checkpoints:
+                        all_artifacts.extend(cp.get("files_produced") or [])
+                    
+                    finish_event = {
+                        "id": request_id,
+                        "object": "chat.completion.chunk",
+                        "choices": [{"delta": {}, "finish_reason": "stop"}],
+                        "x_agent_status": status,
+                        "x_trace_id": task_id,
+                    }
+                    yield f"data: {json.dumps(finish_event)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    break
+    except Exception as e:
+        logger.error(f"Error in streaming multi-agent run: {e}", exc_info=True)
+        err_event = {
+            "id": request_id,
+            "object": "chat.completion.chunk",
+            "choices": [{"delta": {"content": f"[STREAM_ERROR] {str(e)}\n"}}],
+            "x_agent_status": "failed",
+        }
+        yield f"data: {json.dumps(err_event)}\n\n"
+        yield "data: [DONE]\n\n"
 
 
 # ============================================================================
@@ -258,92 +643,91 @@ async def chat_completions(
     """
     _validate_api_key(authorization)
     
-    # V5 Routing
+    # Derive identity and context for routing
     project_id = request.project_id or "default"
     conversation_id = request.conversation_id or request.user or _derive_conversation_id(request)
     memory = store.load(conversation_id, project_id)
     
-    route = determine_execution_route(request, memory)
-    
+    user_messages = [m for m in request.messages if m.role == "user"]
+    latest_user_text = _content_to_text(user_messages[-1].content if user_messages else "")
+
+    # Execute agent path if routed
+    route = await determine_execution_route(request, memory, ollama_client=ollama_client)
     if route == AGENT_PATH:
-        logger.info(f"[{project_id}:{conversation_id}] Routing to AGENT_PATH")
-        user_text = _content_to_text(request.messages[-1].content)
-        result = await agent_loop.run(user_text, memory, workspace_tracker)
-        status = result.get("status")
-        agent_payload: Dict[str, Any] = {
-            "status": status,
-            "plan_remaining": result.get("plan_remaining"),
-            "tool_call": result.get("tool_call"),
-        }
-        # Persist agent continuation state for approval/continue flows (legacy JSON merge handles reload).
-        try:
-            if status == "approval_required":
-                memory.pending_goal = memory.pending_goal or result.get("goal") or user_text
-                memory.pending_approval = {
-                    "tool_call": result.get("tool_call"),
-                    "plan_remaining": result.get("plan_remaining") or result.get("plan") or [],
-                    "history": result.get("history") or [],
-                    "goal": memory.pending_goal,
-                }
-                memory.pending_plan = None
-                memory.pending_history = None
-                store.save(memory)
-            elif status == "partial":
-                memory.pending_goal = memory.pending_goal or user_text
-                memory.pending_plan = result.get("plan_remaining") or []
-                memory.pending_history = result.get("history") or []
-                memory.pending_approval = None
-                store.save(memory)
-            else:
-                # Completed or unknown: always clear pending state and persist.
-                # This prevents "stuck" approvals/continuations if the agent loop cleared
-                # memory.pending_* internally before we reached this branch.
-                memory.pending_approval = None
-                memory.pending_plan = None
-                memory.pending_history = None
-                memory.pending_goal = None
-                store.save(memory)
-        except Exception as e:
-            logger.warning(f"Failed to persist agent continuation state: {e}")
-        # Ensure we never return the internal agent fallback string as the only content.
-        message = result.get("message") or ""
-        if message.strip() == "Task finished or iteration limit reached.":
-            message = ""
-        if status == "approval_required":
-            # Return an explicit approval payload (client-safe) in addition to x_agent_status.
-            if not message:
-                message = json.dumps(
-                    {
-                        "status": "awaiting_approval",
-                        "proposed_action": result.get("tool_call"),
-                    },
-                    indent=2,
-                )
-        if not message:
-            # Provide a structured partial output rather than a bare internal status.
-            message = json.dumps(
-                {
-                    "status": status or "unknown",
-                    "note": "Agent did not produce a user-facing summary. See x_agent_payload.",
-                    "history_excerpt": (result.get("history") or [])[-6:],
-                    "plan_remaining": result.get("plan_remaining"),
-                },
-                indent=2,
+        logger.info(f"[{project_id}:{conversation_id}] Routing to AGENT_PATH: {latest_user_text[:50]}...")
+        
+        if request.stream and USE_STREAMING:
+            return StreamingResponse(
+                _stream_agent_run(request, memory, project_id, conversation_id, latest_user_text),
+                media_type="text/event-stream"
             )
-        return JSONResponse(content={
+        
+        # FIX: Ensure memory knows about the CURRENT turn before the agent runs!
+        # This prevents the 'One-Turn Lag' in history-aware planning.
+        virtual_memory = memory  # For safety, we work on a context-enriched view
+        
+        # Clear stale approval state if this is a fresh research request, not a 'yes/ok'
+        if latest_user_text.lower() not in {"yes", "y", "approve", "approved", "ok", "continue", "c", "resume"}:
+            memory.pending_approval = None
+            memory.pending_plan = None
+            memory.pending_goal = latest_user_text
+            
+        try:
+            agent_result = await agent_loop.run(
+                latest_user_text, 
+                memory, 
+                WorkspaceTracker()
+            )
+        except Exception as e:
+            logger.error(f"Agent execution failed: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Agent error: {str(e)}")
+        
+        # Persist agent state in memory for continue/approve turns
+        status = agent_result.get("status")
+        assistant_text = agent_result.get("message", "")
+        
+        # Record the turn in memory for persistence!
+        if ENABLE_MEMORY_UPDATE:
+            memory = await store.append_turn(memory, latest_user_text, assistant_text)
+            # Save immediately to DB
+            store.save(memory)
+
+        if status == "approval_required":
+            memory.pending_approval = {
+                "tool_call": agent_result.get("tool_call"),
+                "plan_remaining": agent_result.get("plan_remaining"),
+                "history": agent_result.get("history"),
+                "goal": agent_result.get("goal")
+            }
+        elif status == "partial":
+            memory.pending_plan = agent_result.get("plan_remaining")
+            memory.pending_history = agent_result.get("history")
+            memory.pending_goal = latest_user_text
+        else:
+            memory.pending_approval = None
+            memory.pending_plan = None
+            
+        store.save(memory)
+        
+        # Agent results are currently returned as non-streaming completions.
+        response = {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
             "created": int(time.time()),
-            "model": request.model or DEFAULT_MODEL,
+            "model": request.model or get_default_model(),
             "choices": [{
                 "index": 0,
-                "message": {"role": "assistant", "content": message},
-                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": agent_result.get("message", "")},
+                "finish_reason": "stop" if status == "completed" else "length",
             }],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             "x_agent_status": status,
-            "x_agent_payload": agent_payload,
-        })
+            "x_memory": {
+                "conversation_id": conversation_id,
+                "project_id": project_id,
+                "agent_status": status
+            }
+        }
+        return JSONResponse(content=response)
 
     # Use streaming if requested and enabled
     if request.stream and USE_STREAMING:
@@ -352,33 +736,157 @@ async def chat_completions(
             media_type="text/event-stream"
         )
     else:
-        return await _chat_completions_non_streaming(request)
+        res = await _chat_completions_non_streaming(request, memory, project_id, conversation_id)
+        if ENABLE_MEMORY_UPDATE:
+            # Re-fetch assistant text from response body to update memory
+            try:
+                data = json.loads(res.body)
+                assistant_text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                await store.append_turn(memory, latest_user_text, assistant_text)
+                store.save(memory)
+                logger.info(f"[{project_id}:{conversation_id}] Persisted fast-path turn to memory.")
+            except Exception as e:
+                logger.error(f"Failed to record memory: {e}")
+        return res
 
+
+async def _stream_agent_run(request: ChatCompletionRequest, memory: MemoryState, project_id: str, conversation_id: str, latest_user_text: str):
+    """Stream agent execution logs via SSE."""
+    queue = asyncio.Queue()
+    
+    if latest_user_text.lower() not in {"yes", "y", "approve", "approved", "ok", "continue", "c", "resume"}:
+        memory.pending_approval = None
+        memory.pending_plan = None
+        memory.pending_goal = latest_user_text
+
+    async def run_agent():
+        try:
+            res = await agent_loop.run(latest_user_text, memory, WorkspaceTracker(), stream_queue=queue)
+            await queue.put({"result": res})
+        except Exception as e:
+            logger.error(f"Agent execution failed: {e}", exc_info=True)
+            await queue.put({"error": str(e)})
+            
+    asyncio.create_task(run_agent())
+    
+    request_id = f"chatcmpl-{uuid.uuid4().hex}"
+    
+    try:
+        while True:
+            item = await queue.get()
+            if isinstance(item, str):
+                event = {
+                    "id": request_id,
+                    "object": "chat.completion.chunk",
+                    "choices": [{"delta": {"content": item}}]
+                }
+                yield f"data: {json.dumps(event)}\n\n"
+            elif isinstance(item, dict):
+                if "error" in item:
+                    err_event = {
+                        "id": request_id,
+                        "object": "chat.completion.chunk",
+                        "choices": [{"delta": {"content": f"[AGENT_ERROR] {item['error']}\n"}}],
+                        "x_agent_status": "failed",
+                    }
+                    yield f"data: {json.dumps(err_event)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    break
+                elif "result" in item:
+                    agent_result = item["result"]
+                    status = agent_result.get("status")
+                    assistant_text = agent_result.get("message", "")
+                    
+                    if ENABLE_MEMORY_UPDATE:
+                        await store.append_turn(memory, latest_user_text, assistant_text)
+                    
+                    if status == "approval_required":
+                        memory.pending_approval = {
+                            "tool_call": agent_result.get("tool_call"),
+                            "plan_remaining": agent_result.get("plan_remaining"),
+                            "history": agent_result.get("history"),
+                            "goal": agent_result.get("goal")
+                        }
+                    elif status == "partial":
+                        memory.pending_plan = agent_result.get("plan_remaining")
+                        memory.pending_history = agent_result.get("history")
+                        memory.pending_goal = latest_user_text
+                    else:
+                        memory.pending_approval = None
+                        memory.pending_plan = None
+                    store.save(memory)
+                    
+                    # Yield final summary
+                    if assistant_text:
+                        event = {
+                            "id": request_id,
+                            "object": "chat.completion.chunk",
+                            "choices": [{"delta": {"content": "\n\n=== Final Report ===\n\n" + assistant_text}}]
+                        }
+                        yield f"data: {json.dumps(event)}\n\n"
+                    
+                    # Yield finish
+                    finish_event = {
+                        "id": request_id,
+                        "object": "chat.completion.chunk",
+                        "choices": [{"delta": {}, "finish_reason": "stop"}],
+                        "x_agent_status": status
+                    }
+                    yield f"data: {json.dumps(finish_event)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    break
+    except Exception as e:
+        logger.error(f"Error in streaming agent run: {e}", exc_info=True)
+        err_event = {
+            "id": request_id,
+            "object": "chat.completion.chunk",
+            "choices": [{"delta": {"content": f"[STREAM_ERROR] {str(e)}\n"}}],
+            "x_agent_status": "failed",
+        }
+        yield f"data: {json.dumps(err_event)}\n\n"
+        yield "data: [DONE]\n\n"
 
 async def _chat_completions_non_streaming(
-    request: ChatCompletionRequest
+    request: ChatCompletionRequest,
+    memory: Optional[MemoryState] = None,
+    project_id: str = "default",
+    conversation_id: str = "default"
 ) -> JSONResponse:
-    """Handle non-streaming chat completion."""
-    project_id = request.project_id or "default"
-    conversation_id = request.conversation_id or request.user or _derive_conversation_id(request)
+    """Non-streaming completion shim."""
+    if memory is None:
+        memory = store.load(conversation_id, project_id)
     
     logger.info(f"[{project_id}:{conversation_id}] Non-streaming request")
     
     # Load memory and retrieve context
-    memory = store.load(conversation_id, project_id)
     user_messages = [m for m in request.messages if m.role == "user"]
     latest_user_text = _content_to_text(user_messages[-1].content if user_messages else "")
     
     # Semantic retrieval
     retrieved_items = []
+    # Dual-Layer Semantic Retrieval: 
+    # 1. Local items (this chat only)
+    # 2. Global items (Decisions/Constraints/Style across the whole project)
+    retrieved_items = []
     if USE_SEMANTIC_SEARCH:
-        db_items = db.get_memory_items(conversation_id, project_id)
+        # Fetch current conversation's full context
+        local_items = db.get_memory_items(conversation_id, project_id)
+        
+        # Fetch project-wide knowledge (Categories that should be shared)
+        global_items = []
+        for cat in ["decision", "constraint", "style_preferences"]:
+            global_items.extend(db.get_memory_items(None, project_id, category=cat))
+        
+        all_sources = local_items + global_items
+        
         retrieved_items = await retrieve_context(
             latest_user_text,
-            db_items,
+            all_sources,
             top_k=MAX_RETRIEVED_ITEMS,
             embedding_model=embedding_model
         )
+
+
     
     retrieved_text = store.retrieve_relevant(memory, latest_user_text, retrieved_items)
     
@@ -418,7 +926,7 @@ async def _chat_completions_non_streaming(
     # Call Ollama
     try:
         ollama_response = await _call_ollama({
-            "model": request.model or DEFAULT_MODEL,
+            "model": request.model or get_default_model(),
             "messages": ollama_messages,
             "stream": False,
             "temperature": request.temperature or 0.2,
@@ -433,7 +941,7 @@ async def _chat_completions_non_streaming(
     
     # Update memory
     if ENABLE_MEMORY_UPDATE:
-        memory = store.append_turn(memory, latest_user_text, assistant_text)
+        memory = await store.append_turn(memory, latest_user_text, assistant_text)
         
         # Check if compaction needed
         if memory.turn_count % COMPACTION_INTERVAL == 0 and memory.turn_count > 0:
@@ -444,7 +952,7 @@ async def _chat_completions_non_streaming(
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": request.model or DEFAULT_MODEL,
+        "model": request.model or get_default_model(),
         "choices": [{
             "index": 0,
             "message": {"role": "assistant", "content": assistant_text},
@@ -486,16 +994,23 @@ async def _stream_chat_completions(request: ChatCompletionRequest) -> AsyncGener
     user_messages = [m for m in request.messages if m.role == "user"]
     latest_user_text = _content_to_text(user_messages[-1].content if user_messages else "")
     
-    # Semantic retrieval
+    # Dual-Layer Semantic Retrieval
     retrieved_items = []
     if USE_SEMANTIC_SEARCH:
-        db_items = db.get_memory_items(conversation_id, project_id)
+        local_items = db.get_memory_items(conversation_id, project_id)
+        global_items = []
+        for cat in ["decision", "constraint", "style_preferences"]:
+            global_items.extend(db.get_memory_items(None, project_id, category=cat))
+        
+        all_sources = local_items + global_items
+        
         retrieved_items = await retrieve_context(
             latest_user_text,
-            db_items,
+            all_sources,
             top_k=MAX_RETRIEVED_ITEMS,
             embedding_model=embedding_model
         )
+
     
     retrieved_text = store.retrieve_relevant(memory, latest_user_text, retrieved_items)
     
@@ -523,7 +1038,7 @@ async def _stream_chat_completions(request: ChatCompletionRequest) -> AsyncGener
                 "POST",
                 f"{OLLAMA_BASE_URL.rstrip('/')}{OLLAMA_CHAT_PATH}",
                 json={
-                    "model": request.model or DEFAULT_MODEL,
+                    "model": request.model or get_default_model(),
                     "messages": ollama_messages,
                     "stream": True,
                     "temperature": request.temperature or 0.2,
@@ -551,7 +1066,7 @@ async def _stream_chat_completions(request: ChatCompletionRequest) -> AsyncGener
                                 "id": request_id,
                                 "object": "chat.completion.chunk",
                                 "created": int(time.time()),
-                                "model": request.model or DEFAULT_MODEL,
+                                "model": request.model or get_default_model(),
                                 "choices": [{
                                     "index": 0,
                                     "delta": {"content": content},
@@ -581,7 +1096,7 @@ async def _stream_chat_completions(request: ChatCompletionRequest) -> AsyncGener
             "id": request_id,
             "object": "chat.completion.chunk",
             "created": int(time.time()),
-            "model": request.model or DEFAULT_MODEL,
+            "model": request.model or get_default_model(),
             "choices": [{
                 "index": 0,
                 "delta": {},
@@ -593,7 +1108,7 @@ async def _stream_chat_completions(request: ChatCompletionRequest) -> AsyncGener
         
         # Update memory
         if ENABLE_MEMORY_UPDATE:
-            memory = store.append_turn(memory, latest_user_text, full_response)
+            memory = await store.append_turn(memory, latest_user_text, full_response)
             if memory.turn_count % COMPACTION_INTERVAL == 0 and memory.turn_count > 0:
                 asyncio.create_task(_compact_memory_async(conversation_id, project_id, memory))
         
@@ -689,130 +1204,262 @@ async def get_budget(
 
 
 # ============================================================================
-# Phase 4: Iterative Task Engine + Document Research Mode
+# Task & Research Implementation (MCP Compatibility)
 # ============================================================================
 
-def _task_progress(tr: Dict[str, Any], steps: List[Dict[str, Any]]) -> Dict[str, Any]:
-    completed = [s for s in steps if s.get("status") == "completed"]
-    failed = [s for s in steps if s.get("status") == "failed"]
-    paused = [s for s in steps if s.get("status") == "paused"]
-    running = [s for s in steps if s.get("status") == "running"]
-    pending = [s for s in steps if s.get("status") == "pending"]
-
-    # Determine "current" step: prefer the index pointer, else first non-completed.
-    cur = None
-    idx = int(tr.get("current_step_index") or 0)
-    for s in steps:
-        if int(s.get("step_index") or 0) == idx:
-            cur = s
-            break
-    if cur is None:
-        for s in steps:
-            if s.get("status") != "completed":
-                cur = s
-                break
-    pct = 0.0
-    if steps:
-        pct = round(len(completed) / max(1, len(steps)) * 100.0, 1)
-    return {
-        "counts": {
-            "total": len(steps),
-            "completed": len(completed),
-            "pending": len(pending),
-            "running": len(running),
-            "paused": len(paused),
-            "failed": len(failed),
-        },
-        "percent_complete": pct,
-        "current_step": cur,
-        "last_completed_step": completed[-1] if completed else None,
-    }
-
-def _primary_artifact_name(task_type: Optional[str]) -> Optional[str]:
-    # Compatibility shim: use centralized artifact conventions.
-    conv = task_conventions(task_type, artifacts_json=None)
-    return conv.primary
+def _new_task_id() -> str:
+    return f"task-{uuid.uuid4().hex[:8]}"
 
 
-def _parse_iso_dt(s: Any) -> Optional[datetime]:
-    if not s:
-        return None
-    if isinstance(s, datetime):
-        return s
-    try:
-        st = str(s)
-        # stored as "...Z" sometimes; datetime.fromisoformat doesn't accept "Z"
-        if st.endswith("Z"):
-            st = st[:-1] + "+00:00"
-        return datetime.fromisoformat(st)
-    except Exception:
-        return None
-
-
-def _task_time_meta(tr: Dict[str, Any]) -> Dict[str, Any]:
-    # Compatibility shim: use centralized task metadata builder.
-    return _tm_time_meta(tr)
-
-def _task_primary_artifact(tr: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    # Compatibility shim: use centralized task metadata builder.
-    return _tm_primary_artifact(tr)
-
-
-def _safe_task_artifact_path(task_id: str, artifact_name: str) -> Path:
+def _task_or_404(task_id: str) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
     tr = db.get_task_run(task_id)
     if not tr:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
+    steps = db.list_task_steps(task_id)
+    return tr, steps
+
+
+def _task_artifact_dir(task_run: Dict[str, Any]) -> Path:
+    task_id = str(task_run.get("task_id") or "")
+    aj = task_run.get("artifacts_json") or {}
+    return Path(str(aj.get("artifact_dir") or (Path(".runtime") / "tasks" / task_id))).resolve()
+
+
+def _read_text(path: Path, *, max_bytes: int = 2_000_000) -> Optional[str]:
+    try:
+        if not path.exists() or not path.is_file():
+            return None
+        if int(path.stat().st_size) > max_bytes:
+            return None
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        try:
+            return path.read_text(errors="ignore")
+        except Exception:
+            return None
+
+
+def _artifact_listing(task_run: Dict[str, Any]) -> Dict[str, Any]:
+    task_id = str(task_run.get("task_id") or "")
+    task_dir = _task_artifact_dir(task_run)
+    conv = task_conventions(task_run.get("task_type"), artifacts_json=(task_run.get("artifacts_json") or {}))
+    primary_name = conv.primary
+    primary_path = (task_dir / primary_name).resolve() if primary_name else None
+    primary_exists = bool(primary_path and primary_path.exists() and primary_path.is_file())
+
+    files: List[Dict[str, Any]] = []
+    if task_dir.exists():
+        for p in sorted(task_dir.glob("*")):
+            if not p.is_file():
+                continue
+            suffix = p.suffix.lower().lstrip(".")
+            ftype = suffix if suffix else "bin"
+            try:
+                size = int(p.stat().st_size)
+            except Exception:
+                size = None
+            files.append(
+                {
+                    "name": p.name,
+                    "path": str(p),
+                    "type": ftype,
+                    "size_bytes": size,
+                    "is_primary": bool(primary_name and p.name == primary_name),
+                }
+            )
+
+    out: Dict[str, Any] = {
+        "task_id": task_id,
+        "artifact_dir": str(task_dir),
+        "files": files,
+    }
+    if primary_name:
+        out["primary_artifact"] = {
+            "name": primary_name,
+            "exists": primary_exists,
+            "path": str(primary_path) if primary_path else None,
+            "preview_url": f"/v1/tasks/{task_id}/artifacts/{primary_name}" if primary_exists else None,
+        }
+    return out
+
+
+def _task_payload(task_id: str) -> Dict[str, Any]:
+    tr, steps = _task_or_404(task_id)
+    meta = task_meta(tr, steps)
     aj = tr.get("artifacts_json") or {}
-    artifact_dir = Path(str(aj.get("artifact_dir") or (Path(".runtime") / "tasks" / task_id))).resolve()
-    if not artifact_dir.exists() or not artifact_dir.is_dir():
-        raise HTTPException(status_code=404, detail="Artifact directory not found")
-    p = (artifact_dir / artifact_name).resolve()
-    # Prevent path traversal
-    if artifact_dir not in p.parents and artifact_dir != p:
-        raise HTTPException(status_code=400, detail="Invalid artifact path")
-    if not p.exists() or not p.is_file():
-        raise HTTPException(status_code=404, detail="Artifact not found")
-    return p
+    snapshot = aj.get("task_result") if isinstance(aj.get("task_result"), dict) else None
+    artifacts = _artifact_listing(tr)
+    primary = artifacts.get("primary_artifact") or {}
+    primary_report = snapshot.get("primary_report") if snapshot else None
+    if primary_report is None and primary.get("exists") and primary.get("path"):
+        primary_report = _read_text(Path(str(primary.get("path"))))
+
+    logs = snapshot.get("logs") if snapshot and isinstance(snapshot.get("logs"), list) else steps
+    events = snapshot.get("events") if snapshot and isinstance(snapshot.get("events"), list) else steps
+    summary = tr.get("final_summary") or (snapshot.get("summary") if snapshot else None)
+
+    return {
+        "task_id": task_id,
+        "task": tr,
+        "progress": meta.get("progress"),
+        "time": meta.get("time"),
+        "task_meta": meta,
+        "primary_artifact": artifacts.get("primary_artifact"),
+        "primary_report": primary_report,
+        "summary": summary,
+        "logs": logs,
+        "events": events,
+        "artifacts": artifacts.get("files"),
+    }
+
+
+def _normalize_task_input(task_type: str, body: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+    tt = (task_type or "agent").strip().lower()
+    artifacts_json = dict(body.get("artifacts_json") or {})
+    if body.get("path") and not artifacts_json.get("root_path"):
+        artifacts_json["root_path"] = body.get("path")
+    for k in ("files", "logs", "question", "mode", "issue", "goal", "output_path"):
+        if body.get(k) is not None:
+            artifacts_json[k] = body.get(k)
+
+    goal = str(body.get("user_goal") or body.get("goal") or "").strip()
+    if not goal:
+        if tt == "repo_audit":
+            goal = f"Audit repository at {artifacts_json.get('root_path') or '.'}"
+            if artifacts_json.get("question"):
+                goal = f"{goal}: {artifacts_json.get('question')}"
+        elif tt == "research":
+            goal = f"Research {artifacts_json.get('root_path') or '.'}"
+            if artifacts_json.get("question"):
+                goal = f"{goal}: {artifacts_json.get('question')}"
+        elif tt == "issue_triage":
+            goal = f"Issue triage: {artifacts_json.get('issue') or ''}".strip()
+        elif tt == "writing":
+            goal = artifacts_json.get("goal") or "Generate final written output"
+        else:
+            goal = "Task run"
+    return goal, artifacts_json
+
+
+async def _create_profile_task(body: Dict[str, Any], *, task_type: str, user_goal: Optional[str] = None) -> Dict[str, Any]:
+    project_id = str(body.get("project_id") or "default")
+    conversation_id = str(body.get("conversation_id") or "default")
+    max_retries = int(body.get("max_retries") or 1)
+    run_now = bool(body.get("run_now", True))
+
+    goal, artifacts_json = _normalize_task_input(task_type, body)
+    if user_goal:
+        goal = user_goal
+
+    # Map task type to workflow name
+    workflow_map = {
+        "repo_audit": "repo_audit",
+        "research": "research",
+        "issue_triage": "issue_triage",
+        "writing": "refactor",
+        "agent": "existing_repo_fix"
+    }
+    wf_name = workflow_map.get(task_type, "existing_repo_fix")
+    wf = workflow_engine.inspect_workflow(wf_name)
+    stages = wf.get("stages") if wf else []
+    max_steps = len(stages) if stages else 25
+
+    task_id = _new_task_id()
+    
+    # Store initial state in task run
+    art = {
+        **(artifacts_json or {}),
+        "workflow_name": wf_name,
+        "current_stage_index": 0,
+        "variables": {
+            "project_id": project_id,
+            "docs_context": ""
+        }
+    }
+
+    tr = db.create_task_run({
+        "task_id": task_id,
+        "project_id": project_id,
+        "conversation_id": conversation_id,
+        "task_type": task_type,
+        "user_goal": goal,
+        "definition_of_done": body.get("definition_of_done"),
+        "max_steps": max_steps,
+        "max_retries": max_retries,
+        "artifacts_json": art,
+    })
+    if not run_now:
+        return {"task_id": task_id, "task": tr}
+
+    result = await workflow_engine.execute_workflow(task_id)
+    out = _task_payload(task_id)
+    if result.get("final_verdict") == "approval_required":
+        out["action_required"] = {"type": "approval", "note": "Stage approval required"}
+    return out
+
 
 
 @app.post("/v1/tasks")
 async def create_task(
-    req: TaskCreateRequest,
+    request: Request,
     authorization: Optional[str] = Header(default=None),
 ) -> JSONResponse:
     _validate_api_key(authorization)
-    if not task_engine:
-        raise HTTPException(status_code=503, detail="Task engine not initialized")
+    body = await request.json()
+    task_type = str(body.get("task_type") or body.get("type") or "agent").strip().lower()
+    out = await _create_profile_task(body, task_type=task_type)
+    return JSONResponse(content=out)
 
-    tr = task_engine.create_task(
-        project_id=req.project_id,
-        conversation_id=req.conversation_id,
-        task_type=req.task_type,
-        user_goal=req.user_goal,
-        definition_of_done=req.definition_of_done,
-        max_steps=req.max_steps,
-        max_retries=req.max_retries,
-        artifacts_json={},
-    )
-    # Record artifact dir for clients.
-    artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
-    db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
-    tr = db.get_task_run(tr["task_id"]) or tr
+@app.post("/v1/research/run")
+async def research_run(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    body = await request.json()
+    out = await _create_profile_task(body, task_type="research")
+    return JSONResponse(content=out)
 
-    if req.run_now:
-        out = await task_engine.run(tr["task_id"])
-        return JSONResponse(content=out.to_dict())
-    return JSONResponse(status_code=201, content={"task": tr, "steps": []})
+@app.post("/v1/repo_audit/run")
+async def repo_audit_run(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    body = await request.json()
+    out = await _create_profile_task(body, task_type="repo_audit")
+    return JSONResponse(content=out)
+
+@app.post("/v1/issue_triage/run")
+async def issue_triage_run(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    body = await request.json()
+    out = await _create_profile_task(body, task_type="issue_triage")
+    return JSONResponse(content=out)
+
+@app.post("/v1/write/run")
+async def write_run(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    body = await request.json()
+    out = await _create_profile_task(body, task_type="writing")
+    return JSONResponse(content=out)
+
 
 @app.get("/v1/tasks")
-async def list_tasks(
+async def get_tasks(
     project_id: Optional[str] = None,
     conversation_id: Optional[str] = None,
     status: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
     authorization: Optional[str] = Header(default=None),
-) -> JSONResponse:
+) -> Dict[str, Any]:
     _validate_api_key(authorization)
     runs = db.list_task_runs(
         project_id=project_id,
@@ -820,686 +1467,271 @@ async def list_tasks(
         status=status,
         limit=limit,
         offset=offset,
-        order="updated_desc",
     )
-    # Additive metadata for clients (kept light; no file reads here).
-    enriched: List[Dict[str, Any]] = []
     for tr in runs:
-        try:
-            aj = tr.get("artifacts_json") or {}
-        except Exception:
-            aj = {}
-        conv = task_conventions(tr.get("task_type"), artifacts_json=aj)
-        labels = {
-            "pack_name": aj.get("pack_name") if isinstance(aj.get("pack_name"), str) else None,
-            "preset_name": (aj.get("preset") if isinstance(aj.get("preset"), str) else None)
-            or (aj.get("pack_preset") if isinstance(aj.get("pack_preset"), str) else None),
-        }
-        pending = aj.get("pending_approval") if isinstance(aj, dict) else None
-        enriched.append(
-            {
-                **tr,
-                "primary_artifact_name": conv.primary,
-                "labels": labels,
-                "approval_required": bool(isinstance(pending, dict) and pending.get("tool_call")),
-            }
-        )
-    return JSONResponse(content={"tasks": enriched, "limit": limit, "offset": offset})
-
+        conv = task_conventions(tr.get("task_type"), artifacts_json=(tr.get("artifacts_json") or {}))
+        tr["primary_artifact_name"] = conv.primary
+    return {"tasks": runs, "count": len(runs), "limit": limit, "offset": offset}
 
 @app.get("/v1/tasks/{task_id}")
-async def get_task_status(
-    task_id: str,
-    authorization: Optional[str] = Header(default=None),
-) -> JSONResponse:
+async def get_task_status(task_id: str, authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     _validate_api_key(authorization)
-    if not task_engine:
-        raise HTTPException(status_code=503, detail="Task engine not initialized")
-    out = task_engine.get_task(task_id)
-    if not out:
-        raise HTTPException(status_code=404, detail="Task not found")
-    return JSONResponse(content=out.to_dict())
+    out = _task_payload(task_id)
+    return {
+        "task_id": task_id,
+        "task": out.get("task"),
+        "progress": out.get("progress"),
+        "time": out.get("time"),
+        "task_meta": out.get("task_meta"),
+    }
+
 
 @app.get("/v1/tasks/{task_id}/inspect")
-async def inspect_task(
-    task_id: str,
+async def get_task_inspect(task_id: str, authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    _validate_api_key(authorization)
+    return _task_payload(task_id)
+
+@app.get("/v1/presets")
+async def list_presets(authorization: Optional[str] = Header(default=None)) -> List[Dict[str, Any]]:
+    _validate_api_key(authorization)
+    return list_presets_specs()
+
+@app.post("/v1/presets/{name}/run")
+async def run_preset(
+    name: str,
+    request: Request,
     authorization: Optional[str] = Header(default=None),
 ) -> JSONResponse:
     _validate_api_key(authorization)
-    tr = db.get_task_run(task_id)
-    if not tr:
-        raise HTTPException(status_code=404, detail="Task not found")
-    steps = db.list_task_steps(task_id)
-    meta = build_task_meta(tr, steps)
-    prog = meta.get("progress") or _task_progress(tr, steps)
+    if name not in PRESETS:
+        raise HTTPException(status_code=404, detail=f"Unknown preset: {name}")
+    body = await request.json()
+    spec = PRESETS[name]
+    body = dict(body)
+    body.setdefault("max_steps", spec.default_max_steps)
+    body.setdefault("max_retries", spec.default_max_retries)
+    body.setdefault("run_now", True)
+    if spec.task_type == "repo_audit" and not body.get("question") and spec.default_question:
+        body["question"] = spec.default_question
+    if spec.task_type == "issue_triage" and not body.get("issue") and spec.default_issue:
+        body["issue"] = spec.default_issue
+    if spec.task_type == "writing" and not body.get("goal") and spec.default_goal:
+        body["goal"] = spec.default_goal
+
+    out = await _create_profile_task(body, task_type=spec.task_type)
+    task = out.get("task") or {}
+    aj = dict(task.get("artifacts_json") or {})
+    aj["preset"] = name
+    if task.get("task_id"):
+        db.update_task_run(task.get("task_id"), {"artifacts_json": aj})
+        out = _task_payload(str(task.get("task_id")))
+    return JSONResponse(content={"preset": {"name": name}, **out})
+
+@app.post("/v1/presets/packs/{name}/run")
+async def run_preset_pack(
+    name: str,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    _validate_api_key(authorization)
+    if name not in PACKS:
+        raise HTTPException(status_code=404, detail=f"Unknown preset pack: {name}")
+    body = await request.json()
+    pack = PACKS[name]
+    run_now = bool(body.get("run_now", True))
+    runs: List[Dict[str, Any]] = []
+    for preset_name in pack.presets:
+        spec = PRESETS[preset_name]
+        pb = dict(body)
+        pb.setdefault("max_steps", spec.default_max_steps)
+        pb.setdefault("max_retries", spec.default_max_retries)
+        pb["run_now"] = run_now
+        out = await _create_profile_task(pb, task_type=spec.task_type)
+        task = out.get("task") or {}
+        tid = str(task.get("task_id") or out.get("task_id") or "")
+        if tid:
+            tr = db.get_task_run(tid) or {}
+            aj = dict(tr.get("artifacts_json") or {})
+            aj["preset"] = preset_name
+            aj["pack_name"] = name
+            db.update_task_run(tid, {"artifacts_json": aj})
+        runs.append({"preset": {"name": preset_name}, "task": task or {"task_id": out.get("task_id")}})
     return JSONResponse(
         content={
-            "task": tr,
-            "progress": prog,
-            "time": _task_time_meta(tr),
-            "primary_artifact": _task_primary_artifact(tr),
-            "dataset_meta": _tm_dataset_meta(tr),
-            "task_meta": meta,
-            "steps": steps,
+            "pack": {"name": pack.name, "description": pack.description},
+            "runs": runs,
         }
     )
 
-
-@app.get("/v1/tasks/{task_id}/summary")
-async def task_summary(
-    task_id: str,
-    authorization: Optional[str] = Header(default=None),
-) -> JSONResponse:
-    _validate_api_key(authorization)
-    tr = db.get_task_run(task_id)
-    if not tr:
-        raise HTTPException(status_code=404, detail="Task not found")
-    steps = db.list_task_steps(task_id)
-    meta = build_task_meta(tr, steps)
-    prog = meta.get("progress") or _task_progress(tr, steps)
-
-    final = tr.get("final_summary")
-    if not final and prog.get("last_completed_step"):
-        final = (prog["last_completed_step"].get("output_summary") or "")[:1200]
-    out = {
-        "task": {
-            "task_id": tr.get("task_id"),
-            "project_id": tr.get("project_id"),
-            "conversation_id": tr.get("conversation_id"),
-            "task_type": tr.get("task_type"),
-            "status": tr.get("status"),
-            "current_step_index": tr.get("current_step_index"),
-            "retry_count": tr.get("retry_count"),
-            "final_verdict": tr.get("final_verdict"),
-            "final_summary": final,
-            "artifacts_json": tr.get("artifacts_json") or {},
-            "created_at": tr.get("created_at"),
-            "updated_at": tr.get("updated_at"),
-        },
-        "progress": prog,
-        "time": _task_time_meta(tr),
-        "primary_artifact": _task_primary_artifact(tr),
-        "dataset_meta": _tm_dataset_meta(tr),
-        "task_meta": meta,
-    }
-    return JSONResponse(content=out)
-
-
 @app.get("/v1/tasks/{task_id}/logs")
-async def task_logs(
+async def get_task_logs(
     task_id: str,
     tail_steps: int = 50,
     authorization: Optional[str] = Header(default=None),
-) -> JSONResponse:
+) -> Dict[str, Any]:
     _validate_api_key(authorization)
-    tr = db.get_task_run(task_id)
-    if not tr:
-        raise HTTPException(status_code=404, detail="Task not found")
-    steps = db.list_task_steps(task_id)
-    tail_steps = max(1, min(int(tail_steps or 50), 300))
-    steps = steps[-tail_steps:]
-    logs = []
-    for s in steps:
-        logs.append(
-            {
-                "step_index": s.get("step_index"),
-                "step_type": s.get("step_type"),
-                "status": s.get("status"),
-                "attempt_count": s.get("attempt_count"),
-                "instruction": (s.get("instruction") or "")[:400],
-                "output_summary": s.get("output_summary"),
-                "verifier_result": s.get("verifier_result"),
-                "artifact_path": s.get("artifact_path"),
-                "updated_at": s.get("updated_at"),
-            }
-        )
-    return JSONResponse(content={"task_id": task_id, "status": tr.get("status"), "logs": logs})
-
+    out = _task_payload(task_id)
+    logs = out.get("logs")
+    if isinstance(logs, list):
+        logs_list = logs
+    elif isinstance(logs, str):
+        logs_list = [logs]
+    else:
+        logs_list = []
+    tail = max(0, int(tail_steps))
+    if tail > 0 and len(logs_list) > tail:
+        logs_list = logs_list[-tail:]
+    return {"task_id": task_id, "logs": logs_list}
 
 @app.get("/v1/tasks/{task_id}/artifacts")
-async def get_task_artifacts(
-    task_id: str,
-    authorization: Optional[str] = Header(default=None),
-) -> JSONResponse:
+async def get_task_artifacts(task_id: str, authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     _validate_api_key(authorization)
-    tr = db.get_task_run(task_id)
-    if not tr:
-        raise HTTPException(status_code=404, detail="Task not found")
-    aj = tr.get("artifacts_json") or {}
-    artifact_dir = str(aj.get("artifact_dir") or (Path(".runtime") / "tasks" / task_id))
-    d = Path(artifact_dir)
-    conv = task_conventions(tr.get("task_type"), artifacts_json=aj)
-    primary_name = conv.primary
-    files: List[Dict[str, Any]] = []
-    if d.exists() and d.is_dir():
-        for p in sorted(d.glob("*")):
-            if not p.is_file():
-                continue
-            try:
-                st = p.stat()
-                ext = p.suffix.lower()
-                ftype = "json" if ext == ".json" else ("markdown" if ext in {".md", ".markdown"} else ("text" if ext in {".txt", ".log", ".rst"} else "other"))
-                files.append(
-                    {
-                        "name": p.name,
-                        "type": ftype,
-                        "size_bytes": int(st.st_size),
-                        "mtime": int(st.st_mtime),
-                        "is_primary": bool(primary_name and p.name == primary_name),
-                        "preview_url": f"/v1/tasks/{task_id}/artifacts/{p.name}",
-                    }
-                )
-            except Exception:
-                files.append({"name": p.name, "is_primary": bool(primary_name and p.name == primary_name)})
-
-    primary = _task_primary_artifact(tr)
-    return JSONResponse(
-        content={
-            "task_id": task_id,
-            "artifact_dir": artifact_dir,
-            "primary_artifact": primary,
-            "conventions": {"primary_name": conv.primary, "important": conv.important},
-            "files": files,
-        }
-    )
+    tr, _steps = _task_or_404(task_id)
+    return _artifact_listing(tr)
 
 
 @app.get("/v1/tasks/{task_id}/artifacts/{artifact_name}")
-async def preview_task_artifact(
+async def get_task_artifact(
     task_id: str,
     artifact_name: str,
-    format: str = "text",  # text|json
+    format: str = "text",
     max_bytes: int = 50_000,
     tail_lines: int = 200,
     authorization: Optional[str] = Header(default=None),
-) -> JSONResponse:
+) -> Dict[str, Any]:
     _validate_api_key(authorization)
-    p = _safe_task_artifact_path(task_id, artifact_name)
+    tr, _steps = _task_or_404(task_id)
+    task_dir = _task_artifact_dir(tr)
+    path = (task_dir / artifact_name).resolve()
+    if not str(path).startswith(str(task_dir)):
+        raise HTTPException(status_code=400, detail="Invalid artifact path")
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail=f"Artifact not found: {artifact_name}")
 
-    # Important: do not treat 0 as "unset" for these query params.
-    max_bytes = max(512, min(int(max_bytes), 500_000))
-    tail_lines = max(0, min(int(tail_lines), 4000))
-    raw = p.read_bytes()
+    raw = path.read_bytes()
     truncated = False
-    if len(raw) > max_bytes:
+    if max_bytes > 0 and len(raw) > max_bytes:
         raw = raw[-max_bytes:]
         truncated = True
 
-    ext = p.suffix.lower()
-    content_text = ""
-    try:
-        content_text = raw.decode("utf-8")
-    except Exception:
-        content_text = raw.decode("latin-1", errors="replace")
-
-    is_json = (format == "json") or (ext == ".json")
-    if is_json:
+    if format == "json":
         try:
-            obj = json.loads(content_text)
-            content_text = json.dumps(obj, ensure_ascii=False, indent=2)
+            obj = json.loads(raw.decode("utf-8", errors="ignore"))
+            content = json.dumps(obj, ensure_ascii=False, indent=2)
         except Exception:
-            # Leave as text if not valid JSON
-            pass
+            content = raw.decode("utf-8", errors="ignore")
+    else:
+        content = raw.decode("utf-8", errors="ignore")
+        if tail_lines and tail_lines > 0:
+            lines = content.splitlines()
+            if len(lines) > tail_lines:
+                content = "\n".join(lines[-tail_lines:])
+                truncated = True
+    return {"task_id": task_id, "artifact_name": artifact_name, "format": format, "content": content, "truncated": truncated}
 
-    # Tail after optional JSON pretty-printing (tailing raw JSON first often breaks parsing).
-    if tail_lines > 0:
-        lines = content_text.splitlines()
-        if len(lines) > tail_lines:
-            content_text = "\n".join(lines[-tail_lines:])
-            truncated = True
-
-    return JSONResponse(
-        content={
-            "task_id": task_id,
-            "artifact_name": artifact_name,
-            "artifact_path": str(p),
-            "format": format,
-            "truncated": truncated,
-            "content": content_text,
-        }
-    )
-
+@app.get("/v1/tasks/{task_id}/summary")
+async def get_task_summary(task_id: str, authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    _validate_api_key(authorization)
+    out = _task_payload(task_id)
+    return {
+        "task_id": task_id,
+        "task": out.get("task"),
+        "progress": out.get("progress"),
+        "time": out.get("time"),
+        "task_meta": out.get("task_meta"),
+        "primary_artifact": out.get("primary_artifact"),
+        "primary_report": out.get("primary_report"),
+        "summary": out.get("summary"),
+    }
 
 @app.post("/v1/tasks/{task_id}/continue")
-async def continue_task_run(
+async def task_continue(
     task_id: str,
-    req: TaskActionRequest,
+    request: Request,
     authorization: Optional[str] = Header(default=None),
-) -> JSONResponse:
+) -> Dict[str, Any]:
     _validate_api_key(authorization)
-    if not task_engine:
-        raise HTTPException(status_code=503, detail="Task engine not initialized")
+    body = await request.json()
+    action = str(body.get("action") or "continue").strip().lower()
 
-    if req.action == "approve":
-        out = await task_engine.approve(task_id)
-        return JSONResponse(content=out.to_dict())
-    if req.action == "reject":
-        out = await task_engine.reject(task_id, reason=req.reason or "rejected")
-        return JSONResponse(content=out.to_dict())
+    tr, _steps = _task_or_404(task_id)
+    aj = tr.get("artifacts_json") or {}
+    is_workflow = bool(aj.get("workflow_name") or tr.get("task_type") == "workflow")
 
-    out = await task_engine.run(task_id, max_step_advances=req.max_step_advances, max_duration_s=req.max_duration_s)
-    return JSONResponse(content=out.to_dict())
+    if is_workflow:
+        if action in {"continue", "approve"}:
+            result = await workflow_engine.resume_workflow(task_id)
+            out = _task_payload(task_id)
+            if result.get("final_verdict") == "approval_required":
+                out["action_required"] = {"type": "approval", "note": "Stage approval required"}
+            return out
+        if action == "reject":
+            reason = str(body.get("reason") or "rejected")
+            db.update_task_run(
+                task_id,
+                {
+                    "status": "failed",
+                    "final_verdict": "rejected",
+                    "final_summary": f"Workflow stage rejected: {reason}",
+                },
+            )
+            return _task_payload(task_id)
 
+    if action == "continue":
+        result = await task_engine.run(
+            task_id,
+            max_step_advances=int(body.get("max_step_advances") or 3),
+            max_duration_s=float(body.get("max_duration_s") or 20.0),
+        )
+        out = _task_payload(task_id)
+        if result.action_required:
+            out["action_required"] = result.action_required
+        return out
+    if action == "approve":
+        result = await task_engine.approve(task_id)
+        out = _task_payload(task_id)
+        if result.action_required:
+            out["action_required"] = result.action_required
+        return out
+    if action == "reject":
+        reason = str(body.get("reason") or "rejected")
+        aj_dict = dict(aj)
+        pending = aj_dict.pop("pending_approval", None)
+        if isinstance(pending, dict) and pending.get("step_id"):
+            db.update_task_step(str(pending.get("step_id")), {"status": "failed", "output_summary": f"approval_rejected: {reason}"})
+        db.update_task_run(
+            task_id,
+            {
+                "status": "failed",
+                "final_verdict": "rejected",
+                "final_summary": f"Task rejected: {reason}",
+                "artifacts_json": aj_dict,
+            },
+        )
+        return _task_payload(task_id)
 
-@app.post("/v1/research/run")
-async def research_run(
-    req: ResearchRunRequest,
-    authorization: Optional[str] = Header(default=None),
-) -> JSONResponse:
-    _validate_api_key(authorization)
-    if not task_engine:
-        raise HTTPException(status_code=503, detail="Task engine not initialized")
-
-    tr = task_engine.create_task(
-        project_id=req.project_id,
-        conversation_id=req.conversation_id,
-        task_type="research",
-        user_goal=req.question or f"Research folder: {req.path}",
-        definition_of_done="Artifacts written: file_index.json, chunk_summaries.json, file_summaries.md, research_brief.md, open_questions.md, final_report.md",
-        max_steps=req.max_steps,
-        max_retries=req.max_retries,
-        artifacts_json={
-            "root_path": req.path,
-            "files": req.files,
-            "question": req.question,
-            "mode": req.mode,
-        },
-    )
-    # Record artifact dir for clients.
-    artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
-    db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
-    tr = db.get_task_run(tr["task_id"]) or tr
-    if req.run_now:
-        # Keep launch responsive: do minimal safe work and return quickly with a task_id.
-        out = await task_engine.run(tr["task_id"], max_step_advances=1, max_duration_s=10.0)
-        return JSONResponse(content=out.to_dict())
-    return JSONResponse(status_code=201, content={"task": tr, "steps": []})
-
-
-@app.post("/v1/repo_audit/run")
-async def repo_audit_run(
-    req: RepoAuditRunRequest,
-    authorization: Optional[str] = Header(default=None),
-) -> JSONResponse:
-    _validate_api_key(authorization)
-    if not task_engine:
-        raise HTTPException(status_code=503, detail="Task engine not initialized")
-
-    tr = task_engine.create_task(
-        project_id=req.project_id,
-        conversation_id=req.conversation_id,
-        task_type="repo_audit",
-        user_goal=req.question or f"Repo audit: {req.path}",
-        definition_of_done="Artifacts written: file_index.json, entry_points.md, architecture_map.md, risk_notes.md, open_questions.md, audit_report.md",
-        max_steps=req.max_steps,
-        max_retries=req.max_retries,
-        artifacts_json={"root_path": req.path, "question": req.question},
-    )
-    artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
-    db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
-    tr = db.get_task_run(tr["task_id"]) or tr
-    if req.run_now:
-        out = await task_engine.run(tr["task_id"], max_step_advances=3, max_duration_s=25.0)
-        return JSONResponse(content=out.to_dict())
-    return JSONResponse(status_code=201, content={"task": tr, "steps": []})
-
-
-@app.post("/v1/issue_triage/run")
-async def issue_triage_run(
-    req: IssueTriageRunRequest,
-    authorization: Optional[str] = Header(default=None),
-) -> JSONResponse:
-    _validate_api_key(authorization)
-    if not task_engine:
-        raise HTTPException(status_code=503, detail="Task engine not initialized")
-
-    tr = task_engine.create_task(
-        project_id=req.project_id,
-        conversation_id=req.conversation_id,
-        task_type="issue_triage",
-        user_goal=req.issue,
-        definition_of_done="Artifacts written: issue_summary.md, evidence_table.json, likely_causes.md, reproduction_steps.md, next_actions.md",
-        max_steps=req.max_steps,
-        max_retries=req.max_retries,
-        artifacts_json={
-            "root_path": req.path,
-            "issue": req.issue,
-            "files": req.files,
-            "logs": req.logs,
-        },
-    )
-    artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
-    db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
-    tr = db.get_task_run(tr["task_id"]) or tr
-    if req.run_now:
-        out = await task_engine.run(tr["task_id"], max_step_advances=3, max_duration_s=25.0)
-        return JSONResponse(content=out.to_dict())
-    return JSONResponse(status_code=201, content={"task": tr, "steps": []})
-
-
-@app.post("/v1/write/run")
-async def writing_run(
-    req: WritingRunRequest,
-    authorization: Optional[str] = Header(default=None),
-) -> JSONResponse:
-    _validate_api_key(authorization)
-    if not task_engine:
-        raise HTTPException(status_code=503, detail="Task engine not initialized")
-
-    tr = task_engine.create_task(
-        project_id=req.project_id,
-        conversation_id=req.conversation_id,
-        task_type="writing",
-        user_goal=req.goal,
-        definition_of_done="Artifacts written: source_index.json, outline.md, draft.md, final_output.md",
-        max_steps=req.max_steps,
-        max_retries=req.max_retries,
-        artifacts_json={"root_path": req.path, "goal": req.goal, "files": req.files},
-    )
-    artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
-    db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
-    tr = db.get_task_run(tr["task_id"]) or tr
-    if req.run_now:
-        out = await task_engine.run(tr["task_id"], max_step_advances=3, max_duration_s=25.0)
-        return JSONResponse(content=out.to_dict())
-    return JSONResponse(status_code=201, content={"task": tr, "steps": []})
-
-
-# ============================================================================
-# Preset Workflows (operator-friendly entrypoints)
-# ============================================================================
-
-
-@app.get("/v1/presets")
-async def presets_list(
-    authorization: Optional[str] = Header(default=None),
-) -> JSONResponse:
-    _validate_api_key(authorization)
-    # Additive response: existing clients rely on {"presets":[...]}.
-    return JSONResponse(content={"presets": list_presets(), "packs": list_preset_packs()})
-
+    raise HTTPException(status_code=400, detail=f"Unsupported action: {action}")
 
 @app.get("/v1/presets/packs")
-async def preset_packs_list(
-    authorization: Optional[str] = Header(default=None),
-) -> JSONResponse:
+async def list_preset_packs(authorization: Optional[str] = Header(default=None)) -> List[Dict[str, Any]]:
     _validate_api_key(authorization)
-    return JSONResponse(content={"packs": list_preset_packs()})
+    return list_preset_packs_specs()
 
+@app.get("/v1/files/tree")
+async def get_file_tree(path: str, max_depth: int = 3) -> Dict[str, Any]:
+    tree = tool_registry.get_file_tree(path, max_depth)
+    return {"path": path, "tree": tree}
 
-async def _run_preset_internal(preset_name: str, req: PresetRunRequest) -> Dict[str, Any]:
-    """
-    Internal helper used by both /v1/presets/{preset}/run and preset packs.
-    Returns a JSON-serializable dict.
-    """
-    if not task_engine:
-        raise HTTPException(status_code=503, detail="Task engine not initialized")
-
-    name = (preset_name or "").strip()
-    spec = PRESETS.get(name)
-    if not spec:
-        raise HTTPException(status_code=404, detail="Unknown preset")
-
-    max_steps = int(req.max_steps or spec.default_max_steps)
-    max_retries = int(req.max_retries or spec.default_max_retries)
-
-    if name in ("quick_repo_audit", "deep_repo_audit"):
-        path = _require(req, "path")
-        question = req.question
-        if name == "deep_repo_audit" and question:
-            question = f"{question}\n\n(Deep audit requested: emphasize architecture, risks, and unknowns.)"
-        tr = task_engine.create_task(
-            project_id=req.project_id,
-            conversation_id=req.conversation_id,
-            task_type="repo_audit",
-            user_goal=question or f"Repo audit: {path}",
-            definition_of_done="Artifacts written: file_index.json, entry_points.md, architecture_map.md, risk_notes.md, open_questions.md, audit_report.md",
-            max_steps=max_steps,
-            max_retries=max_retries,
-            artifacts_json={"root_path": path, "question": question},
-        )
-        artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
-        db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
-        tr = db.get_task_run(tr["task_id"]) or tr
-        if req.run_now:
-            out = await task_engine.run(tr["task_id"], max_step_advances=3, max_duration_s=25.0)
-            return {"preset": spec.__dict__, **out.to_dict()}
-        return {"preset": spec.__dict__, "task": tr, "steps": []}
-
-    if name == "bug_triage":
-        path = _require(req, "path")
-        issue = _require(req, "issue")
-        tr = task_engine.create_task(
-            project_id=req.project_id,
-            conversation_id=req.conversation_id,
-            task_type="issue_triage",
-            user_goal=issue,
-            definition_of_done="Artifacts written: issue_summary.md, evidence_table.json, likely_causes.md, reproduction_steps.md, next_actions.md",
-            max_steps=max_steps,
-            max_retries=max_retries,
-            artifacts_json={"root_path": path, "issue": issue, "files": req.files, "logs": req.logs},
-        )
-        artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
-        db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
-        tr = db.get_task_run(tr["task_id"]) or tr
-        if req.run_now:
-            out = await task_engine.run(tr["task_id"], max_step_advances=3, max_duration_s=25.0)
-            return {"preset": spec.__dict__, **out.to_dict()}
-        return {"preset": spec.__dict__, "task": tr, "steps": []}
-
-    if name == "docs_research":
-        path = _require(req, "path")
-        mode = req.mode or "research"
-        question = req.question
-        tr = task_engine.create_task(
-            project_id=req.project_id,
-            conversation_id=req.conversation_id,
-            task_type="research",
-            user_goal=question or f"Research folder: {path}",
-            definition_of_done="Artifacts written: file_index.json, chunk_summaries.json, file_summaries.md, research_brief.md, open_questions.md, final_report.md",
-            max_steps=max_steps,
-            max_retries=max_retries,
-            artifacts_json={"preset": name, "root_path": path, "files": req.files, "question": question, "mode": mode},
-        )
-        artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
-        db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
-        tr = db.get_task_run(tr["task_id"]) or tr
-        if req.run_now:
-            # Keep preset launch responsive; heavy work should happen via bounded /continue calls.
-            out = await task_engine.run(tr["task_id"], max_step_advances=1, max_duration_s=10.0)
-            return {"preset": spec.__dict__, **out.to_dict()}
-        return {"preset": spec.__dict__, "task": tr, "steps": []}
-
-    if name in ("dataset_profile", "dataset_theme_report"):
-        path = _require(req, "path")
-        # Question is optional; keep a stable operator-friendly default.
-        question = req.question or (spec.default_question or "Analyze this JSON dataset in bounded batches.")
-        mode = req.mode or "research"
-        tr = task_engine.create_task(
-            project_id=req.project_id,
-            conversation_id=req.conversation_id,
-            task_type="research",
-            user_goal=question,
-            definition_of_done=(
-                "Artifacts written (dataset mode): dataset_profile.json, dataset_facts.json, sample_records.json, "
-                "batch_summaries.json, dataset_brief.md, themes.json, themes.md, dataset_theme_report.md, final_report.md, open_questions.md"
-            ),
-            max_steps=max_steps,
-            max_retries=max_retries,
-            artifacts_json={"preset": name, "root_path": path, "files": req.files, "question": question, "mode": mode},
-        )
-        artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
-        db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
-        tr = db.get_task_run(tr["task_id"]) or tr
-        if req.run_now:
-            # Keep launch responsive; dataset pipelines often need multiple continues.
-            out = await task_engine.run(tr["task_id"], max_step_advances=1, max_duration_s=10.0)
-            return {"preset": spec.__dict__, **out.to_dict()}
-        return {"preset": spec.__dict__, "task": tr, "steps": []}
-
-    if name == "structured_memo":
-        path = _require(req, "path")
-        goal = req.goal or (spec.default_goal or "Write a short structured memo with clear section headings and bullet points.")
-        tr = task_engine.create_task(
-            project_id=req.project_id,
-            conversation_id=req.conversation_id,
-            task_type="writing",
-            user_goal=goal,
-            definition_of_done="Artifacts written: source_index.json, outline.md, draft.md, final_output.md",
-            max_steps=max_steps,
-            max_retries=max_retries,
-            artifacts_json={"root_path": path, "goal": goal, "files": req.files},
-        )
-        artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
-        db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
-        tr = db.get_task_run(tr["task_id"]) or tr
-        if req.run_now:
-            out = await task_engine.run(tr["task_id"], max_step_advances=3, max_duration_s=25.0)
-            return {"preset": spec.__dict__, **out.to_dict()}
-        return {"preset": spec.__dict__, "task": tr, "steps": []}
-
-    if name == "release_review":
-        path = req.path or "."
-        out_path = req.output_path or default_release_review_output_path()
-        question = req.goal or (
-            "Perform a release readiness review of this repository.\n"
-            f"- Scope: {path}\n"
-            "- Identify entry points and request flow.\n"
-            "- Summarize operational risks and unknowns.\n"
-            "- Provide a minimal validation checklist (tests/lint) where applicable.\n"
-            "Keep the report grounded in the repo contents and operator-friendly."
-        )
-        tr = task_engine.create_task(
-            project_id=req.project_id,
-            conversation_id=req.conversation_id,
-            task_type="repo_audit",
-            user_goal=question,
-            definition_of_done=f"Repo audit completed and export queued to {out_path} (approval-gated write).",
-            max_steps=max_steps,
-            max_retries=max_retries,
-            artifacts_json={"preset": "release_review", "root_path": path, "question": question, "output_path": out_path},
-        )
-        artifact_dir = str(Path(".runtime") / "tasks" / tr["task_id"])
-        db.update_task_run(tr["task_id"], {"artifacts_json": {**(tr.get("artifacts_json") or {}), "artifact_dir": artifact_dir}})
-        tr = db.get_task_run(tr["task_id"]) or tr
-        if req.run_now:
-            out = await task_engine.run(tr["task_id"], max_step_advances=6, max_duration_s=50.0)
-            return {"preset": spec.__dict__, **out.to_dict()}
-        return {"preset": spec.__dict__, "task": tr, "steps": []}
-
-    raise HTTPException(status_code=500, detail="Preset handler missing")
-
-
-def _require(req: PresetRunRequest, field: str) -> str:
-    v = getattr(req, field, None)
-    if not v or not str(v).strip():
-        raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
-    return str(v)
-
-
-@app.post("/v1/presets/{preset_name}/run")
-async def presets_run(
-    preset_name: str,
-    req: PresetRunRequest,
-    authorization: Optional[str] = Header(default=None),
-) -> JSONResponse:
-    _validate_api_key(authorization)
-    out = await _run_preset_internal(preset_name, req)
-    # If the caller requested creation-only, keep 201 for consistency.
-    if not req.run_now:
-        return JSONResponse(status_code=201, content=out)
-    return JSONResponse(content=out)
-
-
-@app.post("/v1/presets/packs/{pack_name}/run")
-async def preset_packs_run(
-    pack_name: str,
-    req: PresetRunRequest,
-    authorization: Optional[str] = Header(default=None),
-) -> JSONResponse:
-    _validate_api_key(authorization)
-    if not task_engine:
-        raise HTTPException(status_code=503, detail="Task engine not initialized")
-
-    name = (pack_name or "").strip()
-    pack = PACKS.get(name)
-    if not pack:
-        raise HTTPException(status_code=404, detail="Unknown preset pack")
-
-    root_path = req.path or "."
-    runs: List[Dict[str, Any]] = []
-    prev_artifact_dir: Optional[str] = None
-
-    # Bounded pack orchestration: for each preset in the pack, attempt to run
-    # enough for primary artifacts to exist, but do not allow unbounded looping.
-    for preset in pack.presets:
-        derived = req.model_copy(deep=True)
-        if preset in ("structured_memo",) and prev_artifact_dir:
-            derived.path = prev_artifact_dir
-        else:
-            derived.path = root_path
-
-        if preset == "structured_memo" and not (derived.goal or "").strip():
-            derived.goal = (
-                "Write a short structured memo with clear section headings and bullet points.\n"
-                "Ground the memo strictly in the provided sources/artifacts.\n"
-                "- Do not mention code paths or components that are not explicitly present in the sources.\n"
-                "- If information is missing, say 'Unknown' rather than guessing.\n"
-                "- Do not include TO/FROM/DATE/SUBJECT headers or bracket placeholders."
-            )
-
-        # For bug triage, prefer req.issue if present; otherwise surface a clear error.
-        if preset == "bug_triage":
-            derived.issue = derived.issue or req.issue
-
-        out = await _run_preset_internal(preset, derived)
-        runs.append(out)
-
-        task = out.get("task") or {}
-        task_id = task.get("task_id")
-        # Tag tasks created via pack runs so dashboards/clients can filter by pack
-        # without any new persistence surface. This is additive metadata only.
-        if task_id:
-            tr_live = db.get_task_run(task_id)
-            if tr_live:
-                aj = tr_live.get("artifacts_json") or {}
-                if aj.get("pack_name") != pack.name:
-                    aj = {**aj, "pack_name": pack.name, "pack_preset": preset}
-                    db.update_task_run(task_id, {"artifacts_json": aj})
-                    # Keep response in sync for clients that rely on the immediate payload.
-                    tr_live = db.get_task_run(task_id) or tr_live
-                    task = tr_live
-                    runs[-1]["task"] = tr_live
-
-        artifacts = (task.get("artifacts_json") or {})
-        prev_artifact_dir = artifacts.get("artifact_dir") or prev_artifact_dir
-
-        # Stop early on approval/continuation signals so operator can proceed safely.
-        if out.get("action_required"):
-            return JSONResponse(
-                content={
-                    "pack": pack.__dict__,
-                    "runs": runs,
-                    "action_required": out.get("action_required"),
-                    "note": "pack_paused_for_action",
-                }
-            )
-
-        # If we need additional work before the next preset (e.g., memo wants the audit report),
-        # do a couple bounded continues.
-        if preset in ("quick_repo_audit", "deep_repo_audit", "docs_research") and task.get("status") == "partial":
-            task_id = task.get("task_id")
-            if task_id:
-                for _ in range(2):
-                    cont = await task_engine.run(task_id, max_step_advances=6, max_duration_s=50.0)
-                    out2 = {"preset": out.get("preset"), **cont.to_dict()}
-                    runs[-1] = out2
-                    task = out2.get("task") or task
-                    if (task.get("status") or "") in ("completed", "paused", "failed"):
-                        break
-
-    return JSONResponse(content={"pack": pack.__dict__, "runs": runs})
-
+@app.get("/v1/memory/search")
+async def search_memory(
+    query: str, 
+    limit: int = 10,
+    project_id: str = "default",
+    conversation_id: str = "default"
+) -> Dict[str, Any]:
+    db_items = db.get_memory_items(conversation_id, project_id)
+    retrieved = await retrieve_context(query, db_items, top_k=limit, embedding_model=embedding_model)
+    return {"query": query, "results": retrieved}
 
 # ============================================================================
 # Utility Functions
@@ -1569,3 +1801,241 @@ def _derive_conversation_id(request: ChatCompletionRequest) -> str:
             seed_parts.append(_content_to_text(message.content)[:80])
     seed = "|".join(seed_parts).strip() or "default"
     return seed[:80]
+
+
+# ============================================================================
+# Workflow Engine Endpoints
+# ============================================================================
+
+@app.get("/v1/workflows")
+async def get_workflows(authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    return {"workflows": workflow_engine.list_workflows()}
+
+@app.get("/v1/workflows/{name}")
+async def inspect_workflow(name: str, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    wf = workflow_engine.inspect_workflow(name)
+    if not wf:
+        raise HTTPException(status_code=404, detail=f"Workflow '{name}' not found.")
+    return wf
+
+@app.get("/v1/workflows/{name}/graph")
+async def get_workflow_graph(name: str, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    graph = workflow_engine.get_workflow_graph(name)
+    return {"graph": graph}
+
+@app.post("/v1/workflows/run")
+async def run_workflow(request: Request, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    body = await request.json()
+    workflow_name = body.get("name")
+    project_id = body.get("project_id", "default")
+    conversation_id = body.get("conversation_id", "default")
+    goal = body.get("goal", "Execute workflow")
+    
+    # Verify workflow exists
+    wf = workflow_engine.inspect_workflow(workflow_name)
+    if not wf:
+        raise HTTPException(status_code=404, detail=f"Workflow '{workflow_name}' not found.")
+        
+    task_id = str(uuid.uuid4())[:8] # Short unique ID
+    
+    # Store initial state in task run
+    art = {
+        "workflow_name": workflow_name,
+        "current_stage_index": 0,
+        "variables": {
+            "project_id": project_id,
+            "docs_context": ""
+        }
+    }
+    
+    tr = db.create_task_run({
+        "task_id": task_id,
+        "project_id": project_id,
+        "conversation_id": conversation_id,
+        "task_type": "workflow",
+        "user_goal": goal,
+        "definition_of_done": body.get("definition_of_done"),
+        "max_steps": len(wf.get("stages") or []),
+        "max_retries": 1,
+        "artifacts_json": art
+    })
+    
+    result = await workflow_engine.execute_workflow(task_id)
+    return JSONResponse(content={"task_id": task_id, "task": result})
+
+@app.post("/v1/workflows/create")
+async def create_custom_workflow(request: Request, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    body = await request.json()
+    name = body.get("name")
+    description = body.get("description", "")
+    try:
+        wf = workflow_engine.create_custom_workflow(name, description)
+        return {"ok": True, "workflow": wf}
+    except FileExistsError as fe:
+        raise HTTPException(status_code=400, detail=str(fe))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/v1/workflows/{task_id}/resume")
+async def resume_workflow_endpoint(task_id: str, request: Request, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    body = await request.json()
+    stage = body.get("stage")
+    try:
+        result = await workflow_engine.resume_workflow(task_id, force_stage_name=stage)
+        return JSONResponse(content={"task_id": task_id, "task": result})
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Task run '{task_id}' not found.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/v1/workflows/{task_id}/checkpoints")
+async def get_checkpoints(task_id: str, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    return {"checkpoints": list_task_checkpoints(task_id)}
+
+@app.get("/v1/workflows/runs")
+async def get_workflow_runs(authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    return {"runs": workflow_engine.list_workflow_runs()}
+
+@app.get("/v1/workflows/{run_id}/status")
+async def get_workflow_run_status(run_id: str, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    tr = db.get_task_run(run_id)
+    if not tr:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found.")
+        
+    wf_dir = Path(".runtime") / "workflows" / run_id
+    stages = []
+    if (wf_dir / "stage_state.json").exists():
+        try:
+            stages = json.loads((wf_dir / "stage_state.json").read_text(encoding="utf-8"))
+        except Exception:
+            pass
+            
+    art = tr.get("artifacts_json") or {}
+    return {
+        "run_id": run_id,
+        "workflow_name": art.get("workflow_name"),
+        "status": tr.get("status"),
+        "current_stage_index": art.get("current_stage_index", 0),
+        "stages": stages
+    }
+
+@app.get("/v1/workflows/{run_id}/trace")
+async def get_workflow_run_trace(run_id: str, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    wf_dir = Path(".runtime") / "workflows" / run_id
+    events = []
+    events_file = wf_dir / "tool_events.jsonl"
+    if events_file.exists():
+        try:
+            with open(events_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        events.append(json.loads(line))
+        except Exception:
+            pass
+    return {"events": events}
+
+@app.get("/v1/workflows/{run_id}/state")
+async def get_workflow_run_state_endpoint(run_id: str, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    wf_dir = Path(".runtime") / "workflows" / run_id
+    
+    variables = {}
+    if (wf_dir / "workflow_state.json").exists():
+        try:
+            wf_state = json.loads((wf_dir / "workflow_state.json").read_text(encoding="utf-8"))
+            variables = wf_state.get("variables", {})
+        except Exception:
+            pass
+            
+    contexts = {}
+    if (wf_dir / "context_snapshot.json").exists():
+        try:
+            contexts = json.loads((wf_dir / "context_snapshot.json").read_text(encoding="utf-8"))
+        except Exception:
+            pass
+            
+    models = {}
+    if (wf_dir / "model_selection.json").exists():
+        try:
+            models = json.loads((wf_dir / "model_selection.json").read_text(encoding="utf-8"))
+        except Exception:
+            pass
+            
+    return {
+        "run_id": run_id,
+        "variables": variables,
+        "context_snapshots": contexts,
+        "model_selections": models
+    }
+
+@app.get("/v1/workflows/{run_id}/gates")
+async def get_workflow_run_gates(run_id: str, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    wf_dir = Path(".runtime") / "workflows" / run_id
+    gate_results = {}
+    if (wf_dir / "gate_results.json").exists():
+        try:
+            gate_results = json.loads((wf_dir / "gate_results.json").read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"gate_results": gate_results}
+
+@app.post("/v1/workflows/{run_id}/approve")
+async def approve_workflow_run(run_id: str, request: Request, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    body = await request.json()
+    stage = body.get("stage")
+    if not stage:
+        tr = db.get_task_run(run_id)
+        if tr:
+            art = tr.get("artifacts_json") or {}
+            wf_name = art.get("workflow_name")
+            wf = workflow_engine.inspect_workflow(wf_name)
+            if wf:
+                stages = wf.get("stages") or []
+                idx = art.get("current_stage_index", 0)
+                if idx < len(stages):
+                    stage = stages[idx]["name"]
+    if not stage:
+        raise HTTPException(status_code=400, detail="Stage name must be specified or inferred.")
+        
+    res = workflow_engine.approve_stage(run_id, stage)
+    return res
+
+@app.post("/v1/workflows/{run_id}/reject")
+async def reject_workflow_run(run_id: str, request: Request, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    body = await request.json()
+    stage = body.get("stage")
+    if not stage:
+        tr = db.get_task_run(run_id)
+        if tr:
+            art = tr.get("artifacts_json") or {}
+            wf_name = art.get("workflow_name")
+            wf = workflow_engine.inspect_workflow(wf_name)
+            if wf:
+                stages = wf.get("stages") or []
+                idx = art.get("current_stage_index", 0)
+                if idx < len(stages):
+                    stage = stages[idx]["name"]
+    if not stage:
+        raise HTTPException(status_code=400, detail="Stage name must be specified or inferred.")
+        
+    res = workflow_engine.reject_stage(run_id, stage)
+    return res
+
+@app.get("/v1/workflows/{workflow_name}/explain")
+async def explain_workflow_endpoint(workflow_name: str, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    explanation = workflow_engine.explain_workflow(workflow_name)
+    return {"explanation": explanation}

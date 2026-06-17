@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
@@ -13,10 +14,10 @@ import httpx
 class MacAgentConfig:
     base_url: str
     api_key: str
-    default_model: str = "gemma4:e2b"
+    default_model: str = "gemma4:12b-mlx"
     default_project_id: str = "default"
     default_conversation_id: str = "default"
-    timeout_s: float = 180.0
+    timeout_s: float = 300.0
 
     @staticmethod
     def from_env() -> "MacAgentConfig":
@@ -39,7 +40,7 @@ class MacAgentConfig:
             os.getenv("STARAGENT_DEFAULT_MODEL")
             or os.getenv("MACAGENT_DEFAULT_MODEL")
             or os.getenv("DEFAULT_MODEL")
-            or "gemma4:e2b"
+            or "gemma4:12b-mlx"
         )
         proj = os.getenv("STARAGENT_DEFAULT_PROJECT") or os.getenv("MACAGENT_DEFAULT_PROJECT") or "default"
         conv = os.getenv("STARAGENT_DEFAULT_CONVERSATION") or os.getenv("MACAGENT_DEFAULT_CONVERSATION") or "default"
@@ -54,6 +55,209 @@ class MacAgentResult:
 
     def to_dict(self) -> Dict[str, Any]:
         return {"message": self.message, "agent_status": self.agent_status, "raw": self.raw}
+
+
+class _StreamRenderer:
+    """Render SSE content in full/compact/quiet modes."""
+
+    def __init__(self, mode: str = "full"):
+        self.mode = (mode or "full").lower()
+        self._line_buf = ""
+        self._pending_step: Dict[str, Tuple[str, str]] = {}
+        self._seen_docs = False
+        self._quiet_ticks = 0
+        self._in_verify_block = False
+
+    @staticmethod
+    def _parse_role_line(line: str) -> Tuple[Optional[str], str]:
+        m = re.match(r"^\[([A-Z_]+)\]\s*(.*)$", (line or "").strip())
+        if not m:
+            return None, line
+        return m.group(1), m.group(2)
+
+    @staticmethod
+    def _strip_quotes(text: str) -> str:
+        t = (text or "").strip()
+        if len(t) >= 2 and t[0] in {"'", '"'} and t[-1] == t[0]:
+            return t[1:-1]
+        return t
+
+    @staticmethod
+    def _summarize_step(step: str) -> Tuple[str, str]:
+        s = (step or "").strip()
+        if s.startswith("{") and s.endswith("}"):
+            try:
+                data = json.loads(s)
+                tool = str(data.get("tool") or "step")
+                args = data.get("args") or {}
+                if tool == "write_file":
+                    return tool, str(args.get("path") or "file")
+                if tool == "run_command":
+                    return tool, str(args.get("command") or "command")
+                if tool in {"create_directory", "list_files", "read_file"}:
+                    return tool, str(args.get("path") or "path")
+                return tool, str(args)[:80]
+            except Exception:
+                pass
+        m = re.match(r"([a-zA-Z_][a-zA-Z0-9_]*)\((.*)\)$", s)
+        if not m:
+            return "step", s[:80]
+        tool = m.group(1)
+        args = m.group(2)
+        if tool == "write_file":
+            am = re.match(r'\s*(".*?"|\'.*?\')\s*,', args, re.S)
+            path = _StreamRenderer._strip_quotes(am.group(1)) if am else "file"
+            return tool, path
+        if tool == "run_command":
+            am = re.match(r'\s*(".*?"|\'.*?\')', args, re.S)
+            cmd = _StreamRenderer._strip_quotes(am.group(1)) if am else "command"
+            return tool, cmd
+        if tool in {"create_directory", "list_files", "read_file"}:
+            am = re.match(r'\s*(".*?"|\'.*?\')', args, re.S)
+            target = _StreamRenderer._strip_quotes(am.group(1)) if am else "path"
+            return tool, target
+        return tool, args[:80]
+
+    def _print_compact_line(self, role: str, msg: str) -> None:
+        import sys
+        sys.stdout.write(f"[{role}] {msg}\n")
+        sys.stdout.flush()
+
+    def _print_quiet_progress(self) -> None:
+        import sys
+        self._quiet_ticks += 1
+        if self._quiet_ticks % 3 == 0:
+            sys.stdout.write(".")
+            sys.stdout.flush()
+
+    def _render_line_compact(self, line: str) -> None:
+        raw = (line or "").rstrip()
+        if raw.lstrip().startswith("- ") and self._in_verify_block:
+            self._print_compact_line("VERIFY", raw.strip())
+            return
+
+        role, msg = self._parse_role_line(line)
+        if not role:
+            return
+        plain = (msg or "").strip()
+        if not plain:
+            return
+
+        if "Received task:" in plain:
+            self._print_compact_line("ORCHESTRATOR", "planning task...")
+            return
+        if plain.startswith("[MODEL] "):
+            self._print_compact_line("ROUTER", plain.replace("[MODEL] ", "").strip())
+            return
+        if plain.startswith("[ROUTER] "):
+            self._print_compact_line("ROUTER", plain.replace("[ROUTER] ", "").strip())
+            return
+        if plain.startswith("[MODEL_ROUTER] "):
+            self._print_compact_line("ROUTER", plain.replace("[MODEL_ROUTER] ", "").strip())
+            return
+        # Handle [GUARD], [GUARD:INSPECT], [GUARD:SYNTHESIZE], etc.
+        guard_m = re.match(r'\[GUARD(?::(\w+))?\]\s*(.*)', plain)
+        if guard_m:
+            phase = guard_m.group(1)
+            body = guard_m.group(2).strip()
+            label = f"GUARD:{phase}" if phase else "GUARD"
+            self._print_compact_line(label, body)
+            return
+        if plain.startswith("[PATH_GUARD] "):
+            self._print_compact_line("GUARD", plain.replace("[PATH_GUARD] ", "").strip())
+            return
+        if plain.startswith("[DOCS_EVIDENCE] query="):
+            self._seen_docs = True
+            q = plain.split("query=", 1)[1].strip()
+            self._print_compact_line("DOCS", f"project-doc query: {q[:120]}")
+            return
+        if plain.startswith("[ERROR] insufficient project documentation evidence"):
+            self._print_compact_line("DOCS", "insufficient project documentation evidence ❌")
+            return
+        if plain.startswith("Dispatching to ["):
+            rm = re.search(r"Dispatching to \[([A-Z_]+)\]", plain)
+            if rm:
+                self._print_compact_line("ORCHESTRATOR", f"dispatch -> {rm.group(1)}")
+            return
+        if plain.startswith("[STEP] "):
+            step = plain[len("[STEP] "):].strip()
+            tool, target = self._summarize_step(step)
+            self._pending_step[role] = (tool, target)
+            return
+        if plain.startswith("[RESULT] "):
+            result = plain[len("[RESULT] "):]
+            tool, target = self._pending_step.pop(role, ("result", ""))
+            success = ("[Success]" in result) or ("Successfully" in result)
+            failure = ("[Failed]" in result) or ("Error" in result) or ("failed" in result.lower())
+            mark = "✅" if success and not failure else ("❌" if failure else "•")
+            label = f"{tool} {target}".strip()
+            self._print_compact_line(role, f"{label} {mark}")
+            return
+        if plain.startswith("Verifier Gate:"):
+            self._in_verify_block = True
+            if "PASS" in plain:
+                self._print_compact_line("VERIFY", plain.replace("Verifier Gate:", "").strip() + " ✅")
+            else:
+                self._print_compact_line("VERIFY", "failed ❌")
+            return
+        if plain.startswith("[REPORT] "):
+            body = plain.replace("[REPORT] ", "").strip()
+            if body.startswith("==="):
+                self._print_compact_line("REPORT", body)
+            elif body.startswith("  -"):
+                self._print_compact_line("REPORT", body.strip())
+            else:
+                self._print_compact_line("REPORT", body)
+            return
+        if plain.startswith("Failures:") or plain.startswith("# Multi-Agent Execution Report"):
+            return
+        if plain.startswith("- Required") or plain.startswith("- missing") or plain.startswith("- command"):
+            self._print_compact_line("VERIFY", plain)
+            return
+
+    def _render_line_quiet(self, line: str) -> None:
+        role, msg = self._parse_role_line(line)
+        if not role:
+            return
+        plain = (msg or "").strip()
+        if not plain:
+            return
+        if "Received task:" in plain:
+            self._print_compact_line("TASK", "started")
+            return
+        if plain.startswith("Dispatching to ["):
+            rm = re.search(r"Dispatching to \[([A-Z_]+)\]", plain)
+            if rm:
+                self._print_compact_line("TASK", f"in progress ({rm.group(1)})")
+            return
+        self._print_quiet_progress()
+
+    def feed(self, content: str) -> None:
+        import sys
+        if self.mode == "full":
+            sys.stdout.write(content)
+            sys.stdout.flush()
+            return
+
+        self._line_buf += content
+        while "\n" in self._line_buf:
+            line, self._line_buf = self._line_buf.split("\n", 1)
+            if self.mode == "compact":
+                self._render_line_compact(line)
+            elif self.mode == "quiet":
+                self._render_line_quiet(line)
+
+    def finalize(self, *, trace_id: Optional[str] = None, agent_status: Optional[str] = None) -> None:
+        import sys
+        if self.mode == "quiet" and self._quiet_ticks > 0:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        if self.mode == "compact" and not self._seen_docs:
+            self._print_compact_line("DOCS", "no project-doc requirement detected")
+        if agent_status and self.mode in {"compact", "quiet"}:
+            self._print_compact_line("x_agent_status", agent_status)
+        if trace_id and self.mode in {"compact", "quiet"}:
+            self._print_compact_line("TRACE", f"Full trace: ./scripts/staragent trace {trace_id}")
 
 
 def _normalize_v1_base_url(base_url: str) -> str:
@@ -99,8 +303,8 @@ class MacAgentClient:
     def close(self) -> None:
         self._http.close()
 
-    def health(self) -> Dict[str, Any]:
-        r = self._http.get(f"{self.root_base_url}/health")
+    def health(self, *, timeout: Optional[float] = None) -> Dict[str, Any]:
+        r = self._http.get(f"{self.root_base_url}/health", timeout=timeout)
         r.raise_for_status()
         return r.json()
 
@@ -309,6 +513,102 @@ class MacAgentClient:
         r.raise_for_status()
         return r.json()
 
+    def web_search(self, query: str, max_results: int = 5, project_id: Optional[str] = None) -> Dict[str, Any]:
+        project_id = project_id or self.config.default_project_id
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/search", params={"q": query, "max_results": max_results, "project_id": project_id}, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def web_fetch(self, url: str) -> Dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.post(f"{self.v1_base_url}/web/fetch", params={"url": url}, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def web_extract(self, url: str, project_id: Optional[str] = None) -> Dict[str, Any]:
+        project_id = project_id or self.config.default_project_id
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.post(f"{self.v1_base_url}/web/extract", params={"url": url, "project_id": project_id}, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def web_research(self, query: str, max_results: int = 5, max_sources: int = 3, project_id: Optional[str] = None) -> Dict[str, Any]:
+        project_id = project_id or self.config.default_project_id
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.post(f"{self.v1_base_url}/web/research", params={"query": query, "max_results": max_results, "max_sources": max_sources, "project_id": project_id}, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def search_sources(self, query: str, project_id: Optional[str] = None) -> Dict[str, Any]:
+        project_id = project_id or self.config.default_project_id
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/sources/search", params={"q": query, "project_id": project_id}, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def semantic_search(self, query: str, limit: int = 5) -> Dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/sources/semantic_search", params={"q": query, "limit": limit}, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def index_file(self, path: str, project_id: Optional[str] = None) -> Dict[str, Any]:
+        project_id = project_id or self.config.default_project_id
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.post(f"{self.v1_base_url}/documents/index_file", params={"path": path, "project_id": project_id}, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def index_folder(self, path: str, project_id: Optional[str] = None) -> Dict[str, Any]:
+        project_id = project_id or self.config.default_project_id
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.post(f"{self.v1_base_url}/documents/index_folder", params={"path": path, "project_id": project_id}, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def docs_ingest(self, path: str, source_type: str = "project_docs", project_id: Optional[str] = None) -> Dict[str, Any]:
+        project_id = project_id or self.config.default_project_id
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        payload = {"path": path, "source_type": source_type, "project_id": project_id}
+        r = self._http.post(f"{self.v1_base_url}/docs/ingest", json=payload, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def docs_ingest_package(self, package_name: str, manager: str = "pip", project_id: Optional[str] = None) -> Dict[str, Any]:
+        project_id = project_id or self.config.default_project_id
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        payload = {"package_name": package_name, "manager": manager, "project_id": project_id}
+        r = self._http.post(f"{self.v1_base_url}/docs/ingest-package", json=payload, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def docs_search(self, query: str, package_name: Optional[str] = None, max_results: int = 5, project_id: Optional[str] = None) -> Dict[str, Any]:
+        project_id = project_id or self.config.default_project_id
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        payload: Dict[str, Any] = {"query": query, "max_results": max_results, "project_id": project_id}
+        if package_name:
+            payload["package_name"] = package_name
+        r = self._http.post(f"{self.v1_base_url}/docs/search", json=payload, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def docs_ask(
+        self,
+        question: str,
+        package_name: Optional[str] = None,
+        max_results: int = 5,
+        project_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        project_id = project_id or self.config.default_project_id
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        payload: Dict[str, Any] = {"question": question, "max_results": max_results, "project_id": project_id}
+        if package_name:
+            payload["package_name"] = package_name
+        r = self._http.post(f"{self.v1_base_url}/docs/ask", json=payload, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
     def task_action(
         self,
         task_id: str,
@@ -461,6 +761,7 @@ class MacAgentClient:
         model: Optional[str] = None,
         force_route: Optional[str] = None,
         stream: bool = False,
+        stream_mode: str = "full",
         debug_raw: bool = False,
     ) -> MacAgentResult:
         project_id = project_id or self.config.default_project_id
@@ -480,22 +781,113 @@ class MacAgentClient:
             "messages": [{"role": "user", "content": prompt}],
         }
         headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
-        r = self._http.post(f"{self.v1_base_url}/chat/completions", json=payload, headers=headers)
-        r.raise_for_status()
-        data = r.json()
-        msg = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        agent_status = data.get("x_agent_status")
-        if not debug_raw:
-            # Remove very large raw fields from common outputs.
-            pass
-        return MacAgentResult(message=msg, agent_status=agent_status, raw=data)
+        
+        if stream:
+            final_content = ""
+            agent_status = None
+            raw_data = {}
+            trace_id = None
+            renderer = _StreamRenderer(stream_mode)
+            with self._http.stream("POST", f"{self.v1_base_url}/chat/completions", json=payload, headers=headers) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data_str = line[len("data: "):]
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        if "x_agent_status" in chunk:
+                            agent_status = chunk["x_agent_status"]
+                        if "x_trace_id" in chunk:
+                            trace_id = chunk["x_trace_id"]
+                        raw_data = chunk  # Keep the last chunk's meta
+                        
+                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+                        if "content" in delta:
+                            content = delta["content"]
+                            final_content += content
+                            renderer.feed(content)
+                    except json.JSONDecodeError:
+                        continue
+            renderer.finalize(trace_id=trace_id, agent_status=agent_status)
+            return MacAgentResult(message=final_content, agent_status=agent_status, raw=raw_data)
+        else:
+            r = self._http.post(f"{self.v1_base_url}/chat/completions", json=payload, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            msg = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            agent_status = data.get("x_agent_status")
+            if not debug_raw:
+                # Remove very large raw fields from common outputs.
+                pass
+            return MacAgentResult(message=msg, agent_status=agent_status, raw=data)
 
     def ask(self, prompt: str, **kwargs: Any) -> MacAgentResult:
-        # Force fast path so accidental keyword matches do not trigger agent/tool flow.
-        return self.chat(prompt, force_route="fast", **kwargs)
+        # Allow the server to determine the route (agent vs fast) based on the prompt.
+        return self.chat(prompt, **kwargs)
 
     def agent(self, prompt: str, **kwargs: Any) -> MacAgentResult:
         return self.chat(prompt, force_route="agent", **kwargs)
+
+    def multi_agent(
+        self,
+        task: str,
+        *,
+        project_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        stream: bool = False,
+        stream_mode: str = "full",
+    ) -> MacAgentResult:
+        """Run a multi-agent orchestration task."""
+        project_id = project_id or self.config.default_project_id
+        conversation_id = conversation_id or self.config.default_conversation_id
+
+        payload = {
+            "task": task,
+            "project_id": project_id,
+            "conversation_id": conversation_id,
+            "stream": stream,
+        }
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+
+        if stream:
+            final_content = ""
+            agent_status = None
+            raw_data = {}
+            trace_id = None
+            renderer = _StreamRenderer(stream_mode)
+            with self._http.stream("POST", f"{self.v1_base_url}/multi-agent/run", json=payload, headers=headers) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data_str = line[len("data: "):]
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        if "x_agent_status" in chunk:
+                            agent_status = chunk["x_agent_status"]
+                        if "x_trace_id" in chunk:
+                            trace_id = chunk["x_trace_id"]
+                        raw_data = chunk
+
+                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+                        if "content" in delta:
+                            content = delta["content"]
+                            final_content += content
+                            renderer.feed(content)
+                    except json.JSONDecodeError:
+                        continue
+            renderer.finalize(trace_id=trace_id, agent_status=agent_status)
+            return MacAgentResult(message=final_content, agent_status=agent_status, raw=raw_data)
+        else:
+            r = self._http.post(f"{self.v1_base_url}/multi-agent/run", json=payload, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            return MacAgentResult(message=data.get("message", ""), agent_status=data.get("status"), raw=data)
 
     def approve(self, *, project_id: Optional[str] = None, conversation_id: Optional[str] = None, model: Optional[str] = None) -> MacAgentResult:
         return self.chat("yes", project_id=project_id, conversation_id=conversation_id, model=model)
@@ -509,6 +901,25 @@ class MacAgentClient:
     def rollback(self, *, project_id: Optional[str] = None, conversation_id: Optional[str] = None, model: Optional[str] = None) -> MacAgentResult:
         # Best-effort: if runtime supports rollback tools, agent path will execute them; otherwise it will respond safely.
         return self.agent("Rollback the last action if possible.", project_id=project_id, conversation_id=conversation_id, model=model)
+
+    def get_file_tree(self, path: str, max_depth: int = 3) -> Dict[str, Any]:
+        params = {"path": _resolve_client_path(path), "max_depth": max_depth}
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/files/tree", headers=headers, params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def read_memory(self, query: str, limit: int = 10, project_id: Optional[str] = None, conversation_id: Optional[str] = None) -> Dict[str, Any]:
+        params = {
+            "query": query, 
+            "limit": limit,
+            "project_id": project_id or self.config.default_project_id,
+            "conversation_id": conversation_id or self.config.default_conversation_id
+        }
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/memory/search", headers=headers, params=params)
+        r.raise_for_status()
+        return r.json()
 
     def smoke_test_compact(self) -> Dict[str, Any]:
         """
@@ -562,3 +973,81 @@ class MacAgentClient:
 
         ok = all(r["ok"] for r in results)
         return {"ok": ok, "results": results}
+
+    def workflows_list(self) -> Dict[str, Any]:
+        r = self._http.get(f"{self.v1_base_url}/workflows")
+        return r.json()
+
+    def workflow_inspect(self, name: str) -> Dict[str, Any]:
+        r = self._http.get(f"{self.v1_base_url}/workflows/{name}")
+        return r.json()
+
+    def workflow_graph(self, name: str) -> Dict[str, Any]:
+        r = self._http.get(f"{self.v1_base_url}/workflows/{name}/graph")
+        return r.json()
+
+    def workflow_run(
+        self,
+        name: str,
+        project_id: str,
+        conversation_id: str,
+        goal: str,
+        definition_of_done: Optional[str] = None
+    ) -> Dict[str, Any]:
+        payload = {
+            "name": name,
+            "project_id": project_id,
+            "conversation_id": conversation_id,
+            "goal": goal,
+            "definition_of_done": definition_of_done
+        }
+        r = self._http.post(f"{self.v1_base_url}/workflows/run", json=payload)
+        return r.json()
+
+    def workflow_create(self, name: str, description: str = "") -> Dict[str, Any]:
+        payload = {"name": name, "description": description}
+        r = self._http.post(f"{self.v1_base_url}/workflows/create", json=payload)
+        return r.json()
+
+    def workflow_resume(self, task_id: str, stage: Optional[str] = None) -> Dict[str, Any]:
+        payload = {"stage": stage}
+        r = self._http.post(f"{self.v1_base_url}/workflows/{task_id}/resume", json=payload)
+        return r.json()
+
+    def workflow_checkpoints(self, task_id: str) -> Dict[str, Any]:
+        r = self._http.get(f"{self.v1_base_url}/workflows/{task_id}/checkpoints")
+        return r.json()
+
+    def workflow_runs(self) -> Dict[str, Any]:
+        r = self._http.get(f"{self.v1_base_url}/workflows/runs")
+        return r.json()
+
+    def workflow_run_status(self, run_id: str) -> Dict[str, Any]:
+        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/status")
+        return r.json()
+
+    def workflow_run_trace(self, run_id: str) -> Dict[str, Any]:
+        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/trace")
+        return r.json()
+
+    def workflow_run_state(self, run_id: str) -> Dict[str, Any]:
+        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/state")
+        return r.json()
+
+    def workflow_run_gates(self, run_id: str) -> Dict[str, Any]:
+        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/gates")
+        return r.json()
+
+    def workflow_run_approve(self, run_id: str, stage: Optional[str] = None) -> Dict[str, Any]:
+        payload = {"stage": stage}
+        r = self._http.post(f"{self.v1_base_url}/workflows/{run_id}/approve", json=payload)
+        return r.json()
+
+    def workflow_run_reject(self, run_id: str, stage: Optional[str] = None) -> Dict[str, Any]:
+        payload = {"stage": stage}
+        r = self._http.post(f"{self.v1_base_url}/workflows/{run_id}/reject", json=payload)
+        return r.json()
+
+    def workflow_explain(self, workflow_name: str) -> Dict[str, Any]:
+        r = self._http.get(f"{self.v1_base_url}/workflows/{workflow_name}/explain")
+        return r.json()

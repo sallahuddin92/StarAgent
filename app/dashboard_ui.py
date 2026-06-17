@@ -149,6 +149,21 @@ def render_dashboard_html(*, title: str = "StarAgent Dashboard") -> str:
       .btn.danger {{ border-color: rgba(255,92,124,0.35); color: #ffd1da; }}
       .btn.ok {{ border-color: rgba(86,241,181,0.30); color: #d3ffef; }}
       .btn.small {{ padding: 6px 8px; font-size: 12px; border-radius: 9px; }}
+      .tabbtn {{
+        font-family: var(--mono);
+        font-size: 12px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: rgba(0,0,0,0.18);
+        color: var(--muted);
+        cursor: pointer;
+      }}
+      .tabbtn.active {{
+        color: var(--text);
+        border-color: rgba(110,231,255,0.55);
+        background: rgba(110,231,255,0.10);
+      }}
       .muted {{ color: var(--muted); }}
       .tasks {{
         display: flex;
@@ -273,6 +288,105 @@ def render_dashboard_html(*, title: str = "StarAgent Dashboard") -> str:
         color: var(--text);
         white-space: pre-wrap;
       }}
+
+      /* Chat UX */
+      .chatWrap {{
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        height: calc(100vh - 170px);
+        min-height: 520px;
+      }}
+      .chatHistory {{
+        flex: 1;
+        overflow: auto;
+        padding: 10px 8px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: rgba(0,0,0,0.12);
+      }}
+      .bubble {{
+        max-width: 900px;
+        padding: 10px 12px;
+        border-radius: 14px;
+        border: 1px solid var(--border);
+        margin-bottom: 10px;
+      }}
+      .bubble.user {{
+        margin-left: auto;
+        background: rgba(110,231,255,0.08);
+        border-color: rgba(110,231,255,0.25);
+      }}
+      .bubble.assistant {{
+        margin-right: auto;
+        background: rgba(86,241,181,0.06);
+        border-color: rgba(86,241,181,0.18);
+      }}
+      .bubble .meta {{
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 6px;
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--muted);
+      }}
+      .bubble .meta .left {{
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }}
+      .bubble .content {{
+        font-size: 13px;
+        line-height: 1.55;
+        color: var(--text);
+        overflow-wrap: anywhere;
+      }}
+      .bubble .content pre {{
+        white-space: pre-wrap;
+        background: rgba(0,0,0,0.20);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px 10px;
+        font-family: var(--mono);
+        font-size: 12px;
+        line-height: 1.45;
+        overflow: auto;
+      }}
+      .bubble .content code {{
+        font-family: var(--mono);
+        font-size: 12px;
+        background: rgba(0,0,0,0.22);
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 8px;
+        padding: 1px 6px;
+      }}
+      .bubble .actions {{
+        margin-top: 8px;
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }}
+      .composer {{
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px 10px;
+        background: rgba(0,0,0,0.12);
+      }}
+      .composer textarea {{
+        width: 100%;
+        min-height: 84px;
+        background: rgba(0,0,0,0.18);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px 10px;
+        color: var(--text);
+        font-family: var(--sans);
+        font-size: 13px;
+        line-height: 1.45;
+        resize: vertical;
+      }}
     </style>
   </head>
   <body>
@@ -353,8 +467,11 @@ def render_dashboard_html(*, title: str = "StarAgent Dashboard") -> str:
 
       <section class="panel" id="panelDetail">
         <div class="hd">
-          <h2>Task Detail</h2>
           <div class="row">
+            <button class="tabbtn active" id="tabDetail">Tasks</button>
+            <button class="tabbtn" id="tabChat">Chat</button>
+          </div>
+          <div class="row" id="detailActions">
             <button class="btn small" id="btnContinue">Continue</button>
             <button class="btn small ok" id="btnApprove">Approve</button>
             <button class="btn small danger" id="btnReject">Reject</button>
@@ -362,9 +479,10 @@ def render_dashboard_html(*, title: str = "StarAgent Dashboard") -> str:
           </div>
         </div>
         <div class="bd">
-          <div class="muted" id="noSelection">Select a task to view details.</div>
+          <div id="detailView">
+            <div class="muted" id="noSelection">Select a task to view details.</div>
 
-          <div id="detail" style="display:none;">
+            <div id="detail" style="display:none;">
             <div id="approvalBox" class="banner warn" style="display:none; margin-bottom:12px;">
               <div class="title">Approval required</div>
               <div class="body" id="approvalText"></div>
@@ -472,6 +590,51 @@ def render_dashboard_html(*, title: str = "StarAgent Dashboard") -> str:
               <div class="pre" id="packResult" style="margin-top:10px; max-height: 220px; display:none;"></div>
             </div>
           </div>
+          </div> <!-- /detailView -->
+
+          <div id="chatView" style="display:none;">
+            <div class="chatWrap">
+              <div class="row" style="justify-content: space-between;">
+                <div class="muted" style="font-family:var(--mono); font-size:12px;">
+                  Chat runs tasks via the existing APIs. Use Ctrl+Enter to send.
+                </div>
+                <div class="row">
+                  <button class="btn small" id="btnNewChat">New chat</button>
+                  <button class="btn small" id="btnClearChat">Clear local</button>
+                </div>
+              </div>
+
+              <div id="chatHistory" class="chatHistory"></div>
+
+              <div class="composer">
+                <div class="grid2" style="margin-bottom:10px;">
+                  <div>
+                    <label>path (optional)</label>
+                    <input id="chatPath" class="mono" placeholder="e.g. /path/to/repo or /path/to/dataset_folder" />
+                  </div>
+                  <div>
+                    <label>mode</label>
+                    <select id="chatMode">
+                      <option value="auto">auto (repo/dataset/docs)</option>
+                      <option value="repo">repo</option>
+                      <option value="dataset">dataset</option>
+                      <option value="docs">docs</option>
+                    </select>
+                  </div>
+                </div>
+
+                <label>message</label>
+                <textarea id="chatMsg" placeholder="Ask a question or request a task…"></textarea>
+                <div class="row" style="justify-content: space-between; margin-top:10px;">
+                  <div class="row">
+                    <button class="btn ok" id="btnSendChat">Send</button>
+                    <button class="btn" id="btnChatOpenTasks">Open Tasks tab</button>
+                  </div>
+                  <div class="muted" id="chatStatus" style="font-family:var(--mono); font-size:12px;"></div>
+                </div>
+              </div>
+            </div>
+          </div> <!-- /chatView -->
         </div>
       </section>
     </main>
@@ -831,7 +994,10 @@ def render_dashboard_html(*, title: str = "StarAgent Dashboard") -> str:
       document.getElementById("btnRefresh").addEventListener("click", refreshAll);
       document.getElementById("btnRefreshDetail").addEventListener("click", () => selectedTaskId && loadTaskDetail(selectedTaskId));
       document.getElementById("statusFilter").addEventListener("change", refreshTasks);
-      document.getElementById("projectFilter").addEventListener("change", refreshTasks);
+      document.getElementById("projectFilter").addEventListener("change", () => {{
+        refreshTasks();
+        if (activeTab === "chat") renderChat();
+      }});
       document.getElementById("typeFilter").addEventListener("change", refreshTasks);
       document.getElementById("packFilter").addEventListener("change", refreshTasks);
 
@@ -917,6 +1083,488 @@ def render_dashboard_html(*, title: str = "StarAgent Dashboard") -> str:
           if (selectedTaskId) await loadTaskDetail(selectedTaskId);
         }} catch (e) {{
           pre.textContent = "Error: " + e.message;
+        }}
+      }});
+
+      // ============================================================
+      // Chat tab (task-backed, ChatGPT-like)
+      // ============================================================
+
+      let activeTab = "detail";
+
+      function syncChatInputs() {{
+        const pathEl = document.getElementById("chatPath");
+        const modeEl = document.getElementById("chatMode");
+        if (!pathEl || !modeEl) return;
+        const lastPath = (localStorage.getItem(CHAT_LAST_PATH_KEY) || "").trim();
+        const lastMode = (localStorage.getItem(CHAT_LAST_MODE_KEY) || "auto").trim();
+        if (!String(pathEl.value || "").trim() && lastPath) pathEl.value = lastPath;
+        if (lastMode) modeEl.value = lastMode;
+      }}
+
+      function showTab(name) {{
+        activeTab = (name === "chat") ? "chat" : "detail";
+        const detailView = document.getElementById("detailView");
+        const chatView = document.getElementById("chatView");
+        const actions = document.getElementById("detailActions");
+        const td = document.getElementById("tabDetail");
+        const tc = document.getElementById("tabChat");
+        if (activeTab === "chat") {{
+          detailView.style.display = "none";
+          chatView.style.display = "block";
+          actions.style.display = "none";
+          td.classList.remove("active");
+          tc.classList.add("active");
+          syncChatInputs();
+          renderChat();
+        }} else {{
+          detailView.style.display = "block";
+          chatView.style.display = "none";
+          actions.style.display = "flex";
+          td.classList.add("active");
+          tc.classList.remove("active");
+        }}
+      }}
+
+      document.getElementById("tabDetail").addEventListener("click", () => showTab("detail"));
+      document.getElementById("tabChat").addEventListener("click", () => showTab("chat"));
+      document.getElementById("btnChatOpenTasks").addEventListener("click", () => showTab("detail"));
+
+      function _escapeHtmlJs(s) {{
+        s = String(s || "");
+        return s
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }}
+
+      function _renderMarkdown(md) {{
+        const raw = String(md || "");
+        const blocks = [];
+        const withTokens = raw.replace(/```([\\s\\S]*?)```/g, (m, p1) => {{
+          blocks.push(String(p1 || ""));
+          return `@@CODEBLOCK${{blocks.length - 1}}@@`;
+        }});
+        let html = _escapeHtmlJs(withTokens);
+        html = html.replace(/@@CODEBLOCK(\\d+)@@/g, (m, idx) => {{
+          const i = parseInt(idx || "0", 10);
+          const body = _escapeHtmlJs(blocks[i] || "");
+          return `<pre><code>${{body}}</code></pre>`;
+        }});
+        html = html.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, (m, t, u) => {{
+          const text = _escapeHtmlJs(t);
+          const url = _escapeHtmlJs(u);
+          return `<a href="${{url}}" target="_blank" rel="noreferrer">${{text}}</a>`;
+        }});
+        html = html.replace(/^###\\s+(.+)$/gm, "<h3>$1</h3>");
+        html = html.replace(/^##\\s+(.+)$/gm, "<h2>$1</h2>");
+        html = html.replace(/^#\\s+(.+)$/gm, "<h1>$1</h1>");
+        html = html.replace(/\\*\\*([^*]+)\\*\\*/g, "<strong>$1</strong>");
+        html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+        const lines = html.split(/\\n/);
+        let out = [];
+        let inList = false;
+        for (const ln of lines) {{
+          if (ln.startsWith("- ")) {{
+            if (!inList) {{
+              out.push("<ul>");
+              inList = true;
+            }}
+            out.push("<li>" + ln.slice(2) + "</li>");
+          }} else {{
+            if (inList) {{
+              out.push("</ul>");
+              inList = false;
+            }}
+            out.push(ln);
+          }}
+        }}
+        if (inList) out.push("</ul>");
+        return out.join("\\n").replace(/\\n\\n+/g, "<br><br>").replace(/\\n/g, "<br>");
+      }}
+
+      const CHAT_SESSION_KEY = "staragent_dash_chat_session";
+      const CHAT_HISTORY_PREFIX = "staragent_dash_chat_history:";
+      const CHAT_LAST_PATH_KEY = "staragent_dash_chat_last_path";
+      const CHAT_LAST_MODE_KEY = "staragent_dash_chat_last_mode";
+
+      function chatProjectId() {{
+        const v = (document.getElementById("projectFilter").value || "").trim();
+        return v || "default";
+      }}
+
+      function ensureChatSession() {{
+        let sid = (localStorage.getItem(CHAT_SESSION_KEY) || "").trim();
+        if (!sid) {{
+          sid = "dash-" + Math.random().toString(36).slice(2, 10);
+          localStorage.setItem(CHAT_SESSION_KEY, sid);
+        }}
+        return sid;
+      }}
+
+      function chatConversationId() {{
+        return ensureChatSession();
+      }}
+
+      function chatStorageKey() {{
+        return CHAT_HISTORY_PREFIX + chatProjectId() + ":" + chatConversationId();
+      }}
+
+      function loadChatHistory() {{
+        try {{
+          const raw = localStorage.getItem(chatStorageKey()) || "[]";
+          const arr = JSON.parse(raw);
+          return Array.isArray(arr) ? arr : [];
+        }} catch (e) {{
+          return [];
+        }}
+      }}
+
+      function saveChatHistory(arr) {{
+        try {{
+          localStorage.setItem(chatStorageKey(), JSON.stringify(arr));
+        }} catch (e) {{}}
+      }}
+
+      function pushChatMessage(msg) {{
+        const hist = loadChatHistory();
+        hist.push(msg);
+        saveChatHistory(hist);
+        renderChat();
+      }}
+
+      function updateLastAssistantMessage(patch) {{
+        const hist = loadChatHistory();
+        for (let i = hist.length - 1; i >= 0; i--) {{
+          if (hist[i] && hist[i].role === "assistant") {{
+            hist[i] = Object.assign({{}}, hist[i], patch || {{}});
+            break;
+          }}
+        }}
+        saveChatHistory(hist);
+        renderChat();
+      }}
+
+      function clearChatHistory() {{
+        saveChatHistory([]);
+        renderChat();
+      }}
+
+      function newChatSession() {{
+        const sid = "dash-" + Math.random().toString(36).slice(2, 10);
+        localStorage.setItem(CHAT_SESSION_KEY, sid);
+        clearChatHistory();
+      }}
+
+      function openTaskInDetail(taskId) {{
+        if (!taskId) return;
+        selectedTaskId = taskId;
+        refreshTasks();
+        loadTaskDetail(taskId);
+        showTab("detail");
+      }}
+
+      function renderChat() {{
+        const elHist = document.getElementById("chatHistory");
+        if (!elHist) return;
+        const hist = loadChatHistory();
+        elHist.innerHTML = "";
+        if (!hist.length) {{
+          const d = document.createElement("div");
+          d.className = "muted";
+          d.textContent = "(no messages yet)";
+          elHist.appendChild(d);
+          return;
+        }}
+        for (const m of hist) {{
+          const b = document.createElement("div");
+          const role = (m.role || "assistant") === "user" ? "user" : "assistant";
+          b.className = "bubble " + role;
+
+          const meta = document.createElement("div");
+          meta.className = "meta";
+          const left = document.createElement("div");
+          left.className = "left";
+          const who = document.createElement("div");
+          who.textContent = role === "user" ? "user" : "assistant";
+          left.appendChild(who);
+          if (m.mode) {{
+            const chip = document.createElement("div");
+            chip.className = "chip";
+            chip.textContent = "mode: " + m.mode;
+            left.appendChild(chip);
+          }}
+          if (m.path) {{
+            const chip2 = document.createElement("div");
+            chip2.className = "chip";
+            chip2.textContent = "path: " + String(m.path).slice(0, 48);
+            left.appendChild(chip2);
+          }}
+          meta.appendChild(left);
+          const ts = document.createElement("div");
+          ts.textContent = m.ts ? new Date(m.ts).toLocaleString() : "";
+          meta.appendChild(ts);
+          b.appendChild(meta);
+
+          const content = document.createElement("div");
+          content.className = "content";
+          if (role === "assistant") {{
+            content.innerHTML = _renderMarkdown(m.content || "");
+          }} else {{
+            content.innerHTML = _escapeHtmlJs(m.content || "").replace(/\\n/g, "<br>");
+          }}
+          b.appendChild(content);
+
+          const actions = document.createElement("div");
+          actions.className = "actions";
+          if (m.task_id) {{
+            const btn = document.createElement("button");
+            btn.className = "btn small primary";
+            btn.textContent = "Open task artifacts";
+            btn.addEventListener("click", () => openTaskInDetail(m.task_id));
+            actions.appendChild(btn);
+          }}
+          if (m.approval && m.approval.required && m.task_id) {{
+            const btnA = document.createElement("button");
+            btnA.className = "btn small ok";
+            btnA.textContent = "Approve";
+            btnA.addEventListener("click", () => chatApprove(m.task_id));
+            const btnR = document.createElement("button");
+            btnR.className = "btn small danger";
+            btnR.textContent = "Reject";
+            btnR.addEventListener("click", () => chatReject(m.task_id));
+            actions.appendChild(btnA);
+            actions.appendChild(btnR);
+          }}
+          if (actions.childNodes.length) b.appendChild(actions);
+
+          elHist.appendChild(b);
+        }}
+        elHist.scrollTop = elHist.scrollHeight;
+      }}
+
+      async function classifyPath(path) {{
+        const body = {{ path }};
+        return await apiFetch("/v1/intake/classify", {{ method: "POST", body: JSON.stringify(body) }});
+      }}
+
+      async function waitTask(taskId, *, loops=10, stepAdvances=6, durationS=35.0) {{
+        let last = null;
+        for (let i=1; i<=loops; i++) {{
+          setText("chatStatus", "working... (loop " + i + "/" + loops + ")");
+          const out = await apiFetch(`/v1/tasks/${{encodeURIComponent(taskId)}}/continue`, {{
+            method: "POST",
+            body: JSON.stringify({{ action: "continue", max_step_advances: stepAdvances, max_duration_s: durationS }}),
+          }});
+          last = out;
+          const task = (out.task || {{}});
+          const st = String(task.status || "").toLowerCase();
+          const steps = out.steps || [];
+          let completed = 0;
+          for (const s of steps) if (s && s.status === "completed") completed++;
+          const cur = (task.current_step_index !== null && task.current_step_index !== undefined) ? ("#" + task.current_step_index) : "";
+          setText("chatStatus", "status=" + st + " steps=" + completed + "/" + steps.length + " " + cur);
+          if (st === "completed" || st === "failed" || st === "paused") break;
+          if (out.action_required && String(out.action_required.type || "").toLowerCase() === "approval") break;
+        }}
+        return last;
+      }}
+
+      async function fetchPrimaryArtifactText(taskId) {{
+        const summary = await apiFetch(`/v1/tasks/${{encodeURIComponent(taskId)}}/summary`);
+        const meta = summary.task_meta || {{}};
+        const primary = (meta.primary_artifact || summary.primary_artifact || {{}}) || {{}};
+        const name = primary.name || null;
+        if (!name) {{
+          return {{ summary, primary_name: null, content: (summary.task || {{}}).final_summary || "" }};
+        }}
+        const fmt = String(name).toLowerCase().endsWith(".json") ? "json" : "text";
+        const prev = await apiFetch(`/v1/tasks/${{encodeURIComponent(taskId)}}/artifacts/${{encodeURIComponent(name)}}?format=${{encodeURIComponent(fmt)}}&tail_lines=0&max_bytes=200000`);
+        return {{ summary, primary_name: name, content: prev.content || "" }};
+      }}
+
+      async function runChatSubmit() {{
+        const msgEl = document.getElementById("chatMsg");
+        const pathEl = document.getElementById("chatPath");
+        const modeEl = document.getElementById("chatMode");
+        const text = (msgEl.value || "").trim();
+        const path = (pathEl.value || "").trim();
+        const mode = (modeEl.value || "auto").trim();
+        if (!text) return;
+
+        localStorage.setItem(CHAT_LAST_PATH_KEY, path);
+        localStorage.setItem(CHAT_LAST_MODE_KEY, mode);
+
+        const ts = Date.now();
+        pushChatMessage({{ role: "user", content: text, path, mode, ts }});
+        pushChatMessage({{ role: "assistant", content: "_Working..._", path, mode, ts: Date.now(), status: "running" }});
+        msgEl.value = "";
+
+        const project_id = chatProjectId();
+        const conversation_id = chatConversationId();
+
+        try {{
+          if (!path) {{
+            setText("chatStatus", "sending chat...");
+            const payload = {{
+              model: null,
+              messages: [{{ role: "user", content: text }}],
+              temperature: 0.2,
+              stream: false,
+              project_id,
+              conversation_id,
+            }};
+            const out = await apiFetch("/v1/chat/completions", {{ method: "POST", body: JSON.stringify(payload) }});
+            const content = (((out.choices || [])[0] || {{}}).message || {{}}).content || "";
+            updateLastAssistantMessage({{ content: String(content || ""), status: "completed" }});
+            setText("chatStatus", "ok");
+            return;
+          }}
+
+          let eff = mode;
+          if (mode === "auto") {{
+            setText("chatStatus", "classifying input...");
+            const intake = await classifyPath(path);
+            const it = String(intake.input_type || "");
+            if (it === "repo") eff = "repo";
+            else if (it === "json_dataset") eff = "dataset";
+            else eff = "docs";
+          }}
+
+          setText("chatStatus", "creating task...");
+          let created = null;
+          if (eff === "repo") {{
+            created = await apiFetch("/v1/repo_audit/run", {{
+              method: "POST",
+              body: JSON.stringify({{
+                project_id,
+                conversation_id,
+                path,
+                question: text,
+                max_steps: 25,
+                max_retries: 1,
+                run_now: true,
+              }}),
+            }});
+          }} else if (eff === "dataset") {{
+            created = await apiFetch("/v1/presets/dataset_theme_report/run", {{
+              method: "POST",
+              body: JSON.stringify({{
+                project_id,
+                conversation_id,
+                path,
+                question: text,
+                run_now: true,
+              }}),
+            }});
+          }} else {{
+            created = await apiFetch("/v1/research/run", {{
+              method: "POST",
+              body: JSON.stringify({{
+                project_id,
+                conversation_id,
+                path,
+                question: text,
+                mode: "research",
+                max_steps: 60,
+                max_retries: 1,
+                run_now: true,
+              }}),
+            }});
+          }}
+          const taskId = (created.task || {{}}).task_id || created.task_id;
+          if (!taskId) throw new Error("missing task_id in response");
+
+          await waitTask(taskId, {{ loops: 10, stepAdvances: 6, durationS: 35.0 }});
+          await refreshTasks();
+
+          const summary = await apiFetch(`/v1/tasks/${{encodeURIComponent(taskId)}}/summary`);
+          const meta = summary.task_meta || {{}};
+          const st = String((summary.task || {{}}).status || "").toLowerCase();
+          const approval = meta.approval || null;
+
+          if (st === "paused" || (approval && approval.required)) {{
+            const lines = (approval && Array.isArray(approval.display_lines)) ? approval.display_lines : ["approval required"];
+            updateLastAssistantMessage({{
+              content: "Approval required:\\n\\n" + lines.map(x => "- " + x).join("\\n"),
+              status: "paused",
+              task_id: taskId,
+              approval: approval || {{ required: true }},
+            }});
+            setText("chatStatus", "paused (approval required)");
+            return;
+          }}
+
+          const pr = await fetchPrimaryArtifactText(taskId);
+          updateLastAssistantMessage({{
+            content: pr.content || (summary.task || {{}}).final_summary || "",
+            status: st || "completed",
+            task_id: taskId,
+            primary_artifact: pr.primary_name || null,
+          }});
+          setText("chatStatus", st || "ok");
+        }} catch (e) {{
+          updateLastAssistantMessage({{ content: "Error: " + e.message, status: "error" }});
+          setText("chatStatus", "error");
+        }}
+      }}
+
+      async function chatApprove(taskId) {{
+        if (!taskId) return;
+        try {{
+          setText("chatStatus", "approving...");
+          await apiFetch(`/v1/tasks/${{encodeURIComponent(taskId)}}/continue`, {{
+            method: "POST",
+            body: JSON.stringify({{ action: "approve", max_step_advances: 3, max_duration_s: 20.0 }}),
+          }});
+          await waitTask(taskId, {{ loops: 10, stepAdvances: 6, durationS: 35.0 }});
+          await refreshTasks();
+          const pr = await fetchPrimaryArtifactText(taskId);
+          updateLastAssistantMessage({{
+            content: pr.content || "",
+            status: "completed",
+            task_id: taskId,
+            approval: null,
+          }});
+          setText("chatStatus", "approved");
+        }} catch (e) {{
+          updateLastAssistantMessage({{ content: "Approve error: " + e.message, status: "error", task_id: taskId }});
+          setText("chatStatus", "error");
+        }}
+      }}
+
+      async function chatReject(taskId) {{
+        if (!taskId) return;
+        try {{
+          setText("chatStatus", "rejecting...");
+          await apiFetch(`/v1/tasks/${{encodeURIComponent(taskId)}}/continue`, {{
+            method: "POST",
+            body: JSON.stringify({{ action: "reject", reason: "rejected", max_step_advances: 1, max_duration_s: 10.0 }}),
+          }});
+          await refreshTasks();
+          updateLastAssistantMessage({{ content: "Rejected.", status: "paused", task_id: taskId, approval: null }});
+          setText("chatStatus", "rejected");
+        }} catch (e) {{
+          updateLastAssistantMessage({{ content: "Reject error: " + e.message, status: "error", task_id: taskId }});
+          setText("chatStatus", "error");
+        }}
+      }}
+
+      document.getElementById("btnSendChat").addEventListener("click", runChatSubmit);
+      document.getElementById("btnNewChat").addEventListener("click", () => {{
+        newChatSession();
+        setText("chatStatus", "new chat");
+      }});
+      document.getElementById("btnClearChat").addEventListener("click", () => {{
+        clearChatHistory();
+        setText("chatStatus", "cleared");
+      }});
+      document.getElementById("chatMsg").addEventListener("keydown", (ev) => {{
+        if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) {{
+          ev.preventDefault();
+          runChatSubmit();
         }}
       }});
 

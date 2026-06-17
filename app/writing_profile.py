@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .llm_client import OllamaChatClient
+from .llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,7 @@ class WritingPipeline:
       final_output.md
     """
 
-    def __init__(self, llm: OllamaChatClient):
+    def __init__(self, llm: LLMClient):
         self.llm = llm
 
     def artifact_dir(self, task_id: str) -> Path:

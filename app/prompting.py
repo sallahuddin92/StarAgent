@@ -53,11 +53,13 @@ def build_system_prompt(
 
     lines.append("")
     lines.append("[RULES]")
+    lines.append("- ALWAYS respond in English unless the user explicitly requests another language.")
     lines.append("- Prefer continuity with prior project decisions.")
     lines.append("- Do not rely on raw long chat history.")
     lines.append("- Use the memory sections above as the source of continuity.")
     lines.append("- Keep outputs copy-paste ready when the task is prompt-writing or implementation planning.")
     lines.append("- If context is insufficient, say clearly what is missing.")
+
 
     return "\n".join(lines)
 
@@ -65,7 +67,7 @@ def build_system_prompt(
 class MemoryCompactor:
     """LLM-based memory compaction and summarization."""
     
-    def __init__(self, ollama_client = None, default_model: str = "gemma4:e2b"):
+    def __init__(self, ollama_client = None, default_model: Optional[str] = None):
         """
         Initialize compactor.
         
@@ -74,7 +76,14 @@ class MemoryCompactor:
             default_model: Model to use for compaction
         """
         self.ollama_client = ollama_client
-        self.default_model = default_model
+        self._default_model = default_model
+
+    @property
+    def default_model(self) -> str:
+        if self._default_model:
+            return self._default_model
+        from .model_registry import get_effective_model_config
+        return get_effective_model_config()["model"]
     
     async def should_compact(self, memory: MemoryState, force: bool = False) -> bool:
         """

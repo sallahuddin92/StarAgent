@@ -40,6 +40,7 @@ class Conversation(Base):
     pending_plan = Column(Text, nullable=True)  # List[str] as JSON
     pending_history = Column(Text, nullable=True)  # List[Dict[str, Any]] as JSON
     pending_goal = Column(Text, nullable=True)  # str
+    force_research_flag = Column(Integer, default=0)  # bool as 0/1
 
     # Tracking
     turn_count = Column(Integer, default=0)
@@ -166,6 +167,155 @@ class TaskStep(Base):
     )
 
 
+class WebSource(Base):
+    """Extracted text and metadata from a web search result."""
+    __tablename__ = "web_sources"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    url = Column(String, nullable=False, index=True)
+    project_id = Column(String, nullable=False, index=True)
+    title = Column(String)
+    content = Column(Text, nullable=False)
+    summary = Column(Text)
+    word_count = Column(Integer)
+    embedding = Column(Text)  # JSON-serialized vector
+    metadata_json = Column(Text, default="{}")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_web_sources_project", "project_id", "url"),
+    )
+
+
+class WebCache(Base):
+    """Cache for raw HTML content."""
+    __tablename__ = "web_cache"
+
+    url = Column(String, primary_key=True)
+    raw_html = Column(Text)
+    status_code = Column(Integer)
+    content_type = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime)
+
+
+class SearchLog(Base):
+    """Audit log for all web searches."""
+    __tablename__ = "search_logs"
+
+    id = Column(String, primary_key=True)
+    query = Column(String, nullable=False)
+    project_id = Column(String, nullable=False, index=True)
+    engine = Column(String)
+    results_json = Column(Text)  # List of {title, url, snippet}
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# =========================================================================
+# Local Code Documentation Knowledge Base Models
+# =========================================================================
+
+class DocsSource(Base):
+    """A source of documentation (e.g., a local file, a package, or an official web URL)."""
+    __tablename__ = "docs_sources"
+    
+    source_id = Column(String, primary_key=True)
+    project_id = Column(String, nullable=False, index=True)
+    source_type = Column(String, nullable=False) # devdocs | local_docs | package_source | official_web | project_docs
+    package_name = Column(String, nullable=True)
+    version = Column(String, nullable=True)
+    title = Column(String, nullable=False)
+    path_or_url = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_docs_sources_project", "project_id", "source_type"),
+    )
+
+
+class DocsChunk(Base):
+    """A chunk of documentation text, broken down for searchability."""
+    __tablename__ = "docs_chunks"
+    
+    chunk_id = Column(String, primary_key=True)
+    project_id = Column(String, nullable=False, index=True)
+    source_id = Column(String, ForeignKey("docs_sources.source_id"), nullable=False, index=True)
+    chunk_index = Column(Integer, nullable=False, default=0)
+    source_path = Column(String, nullable=True)
+    page_ref = Column(String, nullable=True)
+    section_ref = Column(String, nullable=True)
+    heading = Column(String, nullable=True)
+    content = Column(Text, nullable=False)
+    code_examples = Column(Text, nullable=True) # Extracted code blocks
+    content_hash = Column(String, nullable=False, index=True) # To avoid duplicate ingestion
+    embedding = Column(Text, nullable=True) # JSON-serialized vector (optional)
+    metadata_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    source = relationship("DocsSource", backref="chunks")
+
+
+class DocsSearchLog(Base):
+    """Audit log for offline docs searches."""
+    __tablename__ = "docs_search_logs"
+    
+    id = Column(String, primary_key=True)
+    project_id = Column(String, nullable=False, index=True)
+    query = Column(String, nullable=False)
+    is_error_lookup = Column(Integer, default=0) # 1 if triggered by verification failure
+    error_message = Column(Text, nullable=True)
+    results_json = Column(Text) # Resulting chunk IDs and titles
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+from functools import wraps
+
+def self_healing_retry(func):
+    """Decorator to retry DatabaseManager operations on OperationalError (missing tables/columns or unlinked files)."""
+    import asyncio
+    from sqlalchemy.exc import OperationalError
+
+    if asyncio.iscoroutinefunction(func):
+        @wraps(func)
+        async def async_wrapper(self, *args, **kwargs):
+            try:
+                return await func(self, *args, **kwargs)
+            except OperationalError as e:
+                err_str = str(e).lower()
+                if "no such table" in err_str or "no such column" in err_str or "disk i/o error" in err_str:
+                    logger.warning(f"[DATABASE_RETRY] Table/column missing or disk I/O error, attempting self-healing: {e}")
+                    try:
+                        self.engine.dispose()
+                        # Re-create tables
+                        Base.metadata.create_all(self.engine)
+                        self._ensure_pending_columns()
+                    except Exception as re_err:
+                        logger.error(f"[DATABASE_RETRY] Failed to recreate tables: {re_err}")
+                    return await func(self, *args, **kwargs)
+                raise
+        return async_wrapper
+    else:
+        @wraps(func)
+        def sync_wrapper(self, *args, **kwargs):
+            try:
+                return func(self, *args, **kwargs)
+            except OperationalError as e:
+                err_str = str(e).lower()
+                if "no such table" in err_str or "no such column" in err_str or "disk i/o error" in err_str:
+                    logger.warning(f"[DATABASE_RETRY] Table/column missing or disk I/O error, attempting self-healing: {e}")
+                    try:
+                        self.engine.dispose()
+                        # Re-create tables
+                        Base.metadata.create_all(self.engine)
+                        self._ensure_pending_columns()
+                    except Exception as re_err:
+                        logger.error(f"[DATABASE_RETRY] Failed to recreate tables: {re_err}")
+                    return func(self, *args, **kwargs)
+                raise
+        return sync_wrapper
+
+
 class DatabaseManager:
     """Manages SQLite database operations for conversation memory."""
     
@@ -243,9 +393,55 @@ class DatabaseManager:
                     alters.append("ALTER TABLE conversations ADD COLUMN pending_history TEXT")
                 if "pending_goal" not in cols:
                     alters.append("ALTER TABLE conversations ADD COLUMN pending_goal TEXT")
+                if "force_research_flag" not in cols:
+                    alters.append("ALTER TABLE conversations ADD COLUMN force_research_flag INTEGER DEFAULT 0")
 
                 for stmt in alters:
                     conn.exec_driver_sql(stmt)
+
+                # Docs chunk metadata migration for project-aware RAG.
+                try:
+                    docs_rows = conn.exec_driver_sql("PRAGMA table_info(docs_chunks)").fetchall()
+                    docs_cols = {r[1] for r in docs_rows}
+                    docs_alters = []
+                    if "project_id" not in docs_cols:
+                        docs_alters.append("ALTER TABLE docs_chunks ADD COLUMN project_id TEXT")
+                    if "chunk_index" not in docs_cols:
+                        docs_alters.append("ALTER TABLE docs_chunks ADD COLUMN chunk_index INTEGER DEFAULT 0")
+                    if "source_path" not in docs_cols:
+                        docs_alters.append("ALTER TABLE docs_chunks ADD COLUMN source_path TEXT")
+                    if "page_ref" not in docs_cols:
+                        docs_alters.append("ALTER TABLE docs_chunks ADD COLUMN page_ref TEXT")
+                    if "section_ref" not in docs_cols:
+                        docs_alters.append("ALTER TABLE docs_chunks ADD COLUMN section_ref TEXT")
+                    if "metadata_json" not in docs_cols:
+                        docs_alters.append("ALTER TABLE docs_chunks ADD COLUMN metadata_json TEXT")
+                    for stmt in docs_alters:
+                        conn.exec_driver_sql(stmt)
+
+                    # Backfill project_id for older rows when available through source join.
+                    conn.exec_driver_sql(
+                        """
+                        UPDATE docs_chunks
+                        SET project_id = (
+                            SELECT s.project_id
+                            FROM docs_sources s
+                            WHERE s.source_id = docs_chunks.source_id
+                        )
+                        WHERE project_id IS NULL OR project_id = ''
+                        """
+                    )
+                except Exception as de:
+                    logger.warning(f"Docs chunk schema migration skipped/failed: {de}")
+                
+                # Ensure FTS5 Virtual Table for content search if available
+                try:
+                    conn.exec_driver_sql("CREATE VIRTUAL TABLE IF NOT EXISTS web_sources_fts USING fts5(content, content='web_sources', content_rowid='id')")
+                    conn.exec_driver_sql("CREATE VIRTUAL TABLE IF NOT EXISTS docs_chunks_fts USING fts5(chunk_id UNINDEXED, heading, content, code_examples)")
+                    # Simple trigger-based sync can be complex in SQLite migrations; we will handle it in source_store.py and docs_store.py
+                except Exception as fe:
+                    logger.warning(f"FTS5 initialization failed (unsupported sqlite?): {fe}")
+
                 if alters:
                     conn.commit()
                     logger.info(f"Added pending_* columns to conversations: {len(alters)}")
@@ -256,6 +452,7 @@ class DatabaseManager:
         """Get a new database session."""
         return self.SessionLocal()
     
+    @self_healing_retry
     def get_or_create_conversation(
         self,
         conversation_id: str,
@@ -286,6 +483,7 @@ class DatabaseManager:
         finally:
             session.close()
     
+    @self_healing_retry
     def get_conversation(self, conversation_id: str, project_id: str) -> Optional[Conversation]:
         """Retrieve conversation by ID and project."""
         session = self.get_session()
@@ -301,6 +499,7 @@ class DatabaseManager:
         finally:
             session.close()
     
+    @self_healing_retry
     def save_memory_state(
         self,
         conversation_id: str,
@@ -330,12 +529,14 @@ class DatabaseManager:
             conv.pending_plan = json.dumps(pending_plan) if pending_plan is not None else None
             conv.pending_history = json.dumps(pending_history) if pending_history is not None else None
             conv.pending_goal = pending_goal if pending_goal is not None else None
+            conv.force_research_flag = 1 if state.get("force_research_flag", False) else 0
             
             session.add(conv)
             session.commit()
         finally:
             session.close()
     
+    @self_healing_retry
     def get_memory_state(self, conversation_id: str, project_id: str) -> Dict[str, Any]:
         """Retrieve memory state for a conversation."""
         session = self.get_session()
@@ -353,19 +554,35 @@ class DatabaseManager:
                     "pending_plan": None,
                     "pending_history": None,
                     "pending_goal": None,
+                    "force_research_flag": False,
                 }
             
+            # Fetch recent archive turns separately
+            turns = session.query(ArchiveTurn).filter_by(
+                conversation_id=conversation_id,
+                project_id=project_id
+            ).order_by(ArchiveTurn.turn_number.asc()).limit(30).all()
+            
+            archive_turns = []
+            for t in turns:
+                archive_turns.append({
+                    "user": t.user_message,
+                    "assistant": t.assistant_message
+                })
+
             return {
                 "project_summary": json.loads(conv.project_summary or "[]"),
                 "decisions": json.loads(conv.decisions or "[]"),
                 "constraints": json.loads(conv.constraints or "[]"),
                 "issues": json.loads(conv.issues or "[]"),
                 "style_preferences": json.loads(conv.style_preferences or "[]"),
+                "archive_turns": archive_turns,
                 "turn_count": conv.turn_count,
                 "pending_approval": json.loads(conv.pending_approval) if getattr(conv, "pending_approval", None) else None,
                 "pending_plan": json.loads(conv.pending_plan) if getattr(conv, "pending_plan", None) else None,
                 "pending_history": json.loads(conv.pending_history) if getattr(conv, "pending_history", None) else None,
                 "pending_goal": getattr(conv, "pending_goal", None),
+                "force_research_flag": bool(getattr(conv, "force_research_flag", 0)),
             }
         finally:
             session.close()
@@ -374,6 +591,7 @@ class DatabaseManager:
     # Task Runs / Steps (Iterative Task Engine)
     # =========================================================================
 
+    @self_healing_retry
     def create_task_run(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """Create and persist a new TaskRun."""
         import uuid
@@ -403,6 +621,7 @@ class DatabaseManager:
         finally:
             session.close()
 
+    @self_healing_retry
     def get_task_run(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Fetch a task run and normalize to a dict."""
         session = self.get_session()
@@ -432,6 +651,7 @@ class DatabaseManager:
         finally:
             session.close()
 
+    @self_healing_retry
     def update_task_run(self, task_id: str, patch: Dict[str, Any]) -> None:
         """Update a task run with a partial patch."""
         session = self.get_session()
@@ -450,6 +670,7 @@ class DatabaseManager:
         finally:
             session.close()
 
+    @self_healing_retry
     def list_task_steps(self, task_id: str) -> List[Dict[str, Any]]:
         """List steps for a task in index order."""
         session = self.get_session()
@@ -482,6 +703,7 @@ class DatabaseManager:
         finally:
             session.close()
 
+    @self_healing_retry
     def create_task_steps(self, task_id: str, steps: List[Dict[str, Any]]) -> None:
         """Bulk insert steps for a task."""
         import uuid
@@ -506,6 +728,7 @@ class DatabaseManager:
         finally:
             session.close()
 
+    @self_healing_retry
     def update_task_step(self, step_id: str, patch: Dict[str, Any]) -> None:
         """Update a task step with a partial patch."""
         session = self.get_session()
@@ -522,6 +745,7 @@ class DatabaseManager:
         finally:
             session.close()
 
+    @self_healing_retry
     def list_task_runs(
         self,
         *,
@@ -585,13 +809,16 @@ class DatabaseManager:
         finally:
             session.close()
     
+    @self_healing_retry
     def add_memory_item(
         self,
         conversation_id: str,
         project_id: str,
         category: str,
         content: str,
-        embedding: Optional[List[float]] = None
+        embedding: Optional[List[float]] = None,
+        *args,
+        **kwargs
     ) -> MemoryItem:
         """Add a memory item with optional embedding."""
         import uuid
@@ -613,22 +840,52 @@ class DatabaseManager:
         finally:
             session.close()
     
+    @self_healing_retry
     def get_memory_items(
         self,
-        conversation_id: str,
+        conversation_id: Optional[str],
         project_id: str,
-        category: Optional[str] = None
+        category: Optional[str] = None,
+        include_global: bool = False
     ) -> List[MemoryItem]:
-        """Retrieve memory items for a conversation, optionally filtered by category."""
+        """
+        Retrieve memory items for a conversation or project.
+        
+        Args:
+            conversation_id: Specific conversation to target.
+            project_id: Project scope.
+            category: Filter by category (e.g. 'decision').
+            include_global: If True and conversation_id is provided, also includes 
+                            project-level items that aren't tied to a specific chat.
+        """
         session = self.get_session()
         try:
-            query = session.query(MemoryItem).filter_by(conversation_id=conversation_id, project_id=project_id)
+            if conversation_id:
+                if include_global:
+                    # Fetch items for this conversation OR items in this project with NO conversation_id (Global)
+                    from sqlalchemy import or_
+                    query = session.query(MemoryItem).filter(
+                        MemoryItem.project_id == project_id
+                    ).filter(
+                        or_(
+                            MemoryItem.conversation_id == conversation_id,
+                            MemoryItem.conversation_id == "global", # Explicitly marked global
+                            MemoryItem.conversation_id == ""        # Or empty
+                        )
+                    )
+                else:
+                    query = session.query(MemoryItem).filter_by(conversation_id=conversation_id, project_id=project_id)
+            else:
+                query = session.query(MemoryItem).filter_by(project_id=project_id)
+                
             if category:
                 query = query.filter_by(category=category)
             return query.all()
         finally:
             session.close()
+
     
+    @self_healing_retry
     def add_archive_turn(
         self,
         conversation_id: str,
@@ -672,6 +929,7 @@ class DatabaseManager:
         finally:
             session.close()
     
+    @self_healing_retry
     def get_archive_turns(
         self,
         conversation_id: str,

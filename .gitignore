@@ -42,3 +42,4 @@ dist/
 # OS / editor
 .DS_Store
 .vscode/
+node_modules

@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fullstack CRUD App</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 p-8">
+<h1 class="text-3xl font-bold mb-6">Item Manager</h1>
+<div id="app" class="max-w-4xl mx-auto bg-white p-6 rounded-lg shadow-md">
+<h2 class="text-2xl font-semibold mb-4">Items</h2>
+<div id="items-list" class="space-y-4">
+<p id="loading-message" class="text-center text-gray-500">Loading items...</p>
+</div>
+<div id="form-section" class="mt-8 pt-6 border-t">
+<h2 class="text-2xl font-semibold mb-4">Add New Item</h2>
+<input type="text" id="name" placeholder="Name" class="w-full p-2 border rounded mb-3">
+<input type="text" id="description" placeholder="Description" class="w-full p-2 border rounded mb-4">
+<button onclick="addItem()" class="bg-blue-500 text-white p-2 rounded hover:bg-blue-600">Add Item</button>
+</div>
+</div>
+<script>
+const API_URL = 'http://127.0.0.1:8000';
+async function fetchItems() {
+const listElement = document.getElementById('items-list');
+const loadingMessage = document.getElementById('loading-message');
+listElement.innerHTML = '';
+loadingMessage.style.display = 'block';
+try {
+const response = await fetch(`${API_URL}/items/`);
+const items = await response.json();
+loadingMessage.style.display = 'none';
+items.forEach(item => {
+const div = document.createElement('div');
+div.className = 'border p-4 rounded-lg shadow-sm';
+div.innerHTML = `
+<h3 class="text-xl font-bold">${item.name}</h3>
+<p class="text-gray-600">Description: ${item.description || 'N/A'}</p>
+`;
+listElement.appendChild(div);
+});
+} catch (error) {
+listElement.innerHTML = '<p class="text-red-500">Error fetching data. Ensure FastAPI backend is running.</p>';
+}
+}
+async function addItem() {
+const name = document.getElementById('name').value;
+const description = document.getElementById('description').value;
+if (!name) {
+alert("Name is required.");
+return;
+}
+try {
+const response = await fetch(`${API_URL}/items/`, {
+method: 'POST',
+headers: {
+'Content-Type': 'application/json'
+},
+body: JSON.stringify({ name: name, description: description })
+});
+if (!response.ok) {
+throw new Error('Failed to add item');
+}
+// Clear form and refresh list
+document.getElementById('name').value = '';
+document.getElementById('description').value = '';
+fetchItems();
+} catch (error) {
+alert(`Error adding item: ${error.message}`);
+}
+}
+// Initialize the application
+document.addEventListener('DOMContentLoaded', fetchItems);
+</script>
+</body>
+</html>

@@ -23,6 +23,9 @@ class ChatCompletionRequest(BaseModel):
 
 
 class MemoryState(BaseModel):
+    model_config = {
+        "extra": "allow"
+    }
     conversation_id: str
     project_id: str = "default"
     project_summary: List[str] = Field(default_factory=list)
@@ -37,6 +40,10 @@ class MemoryState(BaseModel):
     pending_plan: Optional[List[str]] = None
     pending_history: Optional[List[Dict[str, Any]]] = None
     pending_goal: Optional[str] = None
+    
+    # StarAgent v3 explicit system-level research trigger flag
+    force_research_flag: bool = False
+    last_api_error: Optional[str] = None
 
 
 class ChatCompletionResponse(BaseModel):

@@ -1,0 +1,93 @@
+description: Develop new features from specification details.
+name: feature_build
+stages:
+- allowed_tools:
+  - read_file
+  - list_files
+  - search_files
+  - grep
+  - file_tree
+  approval_required: false
+  blocked_tools:
+  - write_file
+  - patch
+  - git
+  - shell
+  - docker
+  directory: 01_inspect
+  name: inspect
+  purpose: Inspect codebase structure, discover files, and identify entry points
+  required_outputs:
+  - entry_points.md
+  verifier: file_exists
+- allowed_tools:
+  - read_file
+  - list_files
+  - search_files
+  - grep
+  approval_required: false
+  blocked_tools:
+  - write_file
+  - patch
+  - git
+  - shell
+  - docker
+  directory: 02_analyze
+  name: analyze
+  purpose: Analyze codebase architecture, design patterns, and dependencies
+  required_outputs:
+  - architecture_map.md
+  verifier: file_exists
+- allowed_tools:
+  - read_file
+  - grep
+  approval_required: true
+  blocked_tools:
+  - write_file
+  - patch
+  - git
+  - shell
+  - docker
+  directory: 03_plan
+  name: plan
+  purpose: Formulate a detailed execution plan to address the goal
+  required_outputs:
+  - plan.md
+  verifier: file_exists
+- allowed_tools:
+  - write_file
+  - patch
+  - git
+  - shell
+  - docker
+  - run_command
+  approval_required: false
+  blocked_tools: []
+  directory: 04_execute
+  name: execute
+  purpose: Apply codebase changes or compile final output reports
+  required_outputs:
+  - feature_report.md
+  verifier: file_exists
+- allowed_tools:
+  - pytest
+  - npm
+  - coverage
+  - lint
+  - run_command
+  approval_required: false
+  blocked_tools:
+  - write_file
+  directory: 05_verify
+  name: verify
+  purpose: Execute verification checks, run tests, and validate correctness
+  required_outputs: []
+  verifier: pytest
+- allowed_tools: []
+  approval_required: false
+  blocked_tools: []
+  directory: 06_finalize
+  name: finalize
+  purpose: Cleanup, generate final report, and archive task checkpoints
+  required_outputs: []
+  verifier: always_pass

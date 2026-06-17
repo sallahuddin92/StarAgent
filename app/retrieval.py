@@ -11,13 +11,39 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-# Import dependencies
+import importlib.util
+import threading
+
+# Dynamic check for sentence-transformers package availability without loading it
 try:
-    from sentence_transformers import SentenceTransformer
-    HAS_SENTENCE_TRANSFORMERS = True
-except ImportError:
+    HAS_SENTENCE_TRANSFORMERS = importlib.util.find_spec("sentence_transformers") is not None
+except Exception:
     HAS_SENTENCE_TRANSFORMERS = False
+
+if not HAS_SENTENCE_TRANSFORMERS:
     logger.warning("sentence-transformers not available, using heuristic search fallback")
+
+_SENTENCE_TRANSFORMER_MODEL = None
+_MODEL_LOCK = threading.Lock()
+
+def _get_sentence_transformer() -> Optional[object]:
+    global _SENTENCE_TRANSFORMER_MODEL
+    if _SENTENCE_TRANSFORMER_MODEL is not None:
+        return _SENTENCE_TRANSFORMER_MODEL
+    
+    with _MODEL_LOCK:
+        if _SENTENCE_TRANSFORMER_MODEL is not None:
+            return _SENTENCE_TRANSFORMER_MODEL
+        try:
+            from sentence_transformers import SentenceTransformer
+            # Use lightweight model for local deployment
+            logger.info("Initializing sentence-transformers model: all-MiniLM-L6-v2...")
+            _SENTENCE_TRANSFORMER_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+            logger.info("Loaded sentence-transformers model: all-MiniLM-L6-v2")
+        except Exception as e:
+            logger.error(f"Failed to load embedding model: {e}")
+            _SENTENCE_TRANSFORMER_MODEL = None
+    return _SENTENCE_TRANSFORMER_MODEL
 
 
 @dataclass
@@ -34,16 +60,22 @@ class EmbeddingModel:
     def __init__(self, use_ollama: bool = False, ollama_url: str = "http://127.0.0.1:11434"):
         self.use_ollama = use_ollama
         self.ollama_url = ollama_url
-        self.model = None
+        self._model_override = None
         
-        if not use_ollama and HAS_SENTENCE_TRANSFORMERS:
-            try:
-                # Use lightweight model for local deployment
-                self.model = SentenceTransformer("all-MiniLM-L6-v2")
-                logger.info("Loaded sentence-transformers model: all-MiniLM-L6-v2")
-            except Exception as e:
-                logger.error(f"Failed to load embedding model: {e}")
-                self.use_ollama = True
+        if not use_ollama and not HAS_SENTENCE_TRANSFORMERS:
+            self.use_ollama = True
+
+    @property
+    def model(self):
+        if self._model_override is not None:
+            return self._model_override
+        if self.use_ollama:
+            return None
+        return _get_sentence_transformer()
+
+    @model.setter
+    def model(self, value):
+        self._model_override = value
     
     async def embed(self, text: str) -> Optional[List[float]]:
         """Generate embedding for text."""
