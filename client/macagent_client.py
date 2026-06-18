@@ -995,14 +995,20 @@ class MacAgentClient:
         project_id: str,
         conversation_id: str,
         goal: str,
-        definition_of_done: Optional[str] = None
+        definition_of_done: Optional[str] = None,
+        mode: str = "live",
+        urls: Optional[List[str]] = None,
+        docs: bool = False
     ) -> Dict[str, Any]:
         payload = {
             "name": name,
             "project_id": project_id,
             "conversation_id": conversation_id,
             "goal": goal,
-            "definition_of_done": definition_of_done
+            "definition_of_done": definition_of_done,
+            "mode": mode,
+            "urls": urls or [],
+            "docs": docs
         }
         headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
         r = self._http.post(f"{self.v1_base_url}/workflows/run", json=payload, headers=headers)
@@ -1070,4 +1076,14 @@ class MacAgentClient:
     def workflow_explain(self, workflow_name: str) -> Dict[str, Any]:
         headers = {"Authorization": f"Bearer {self.config.api_key}"}
         r = self._http.get(f"{self.v1_base_url}/workflows/{workflow_name}/explain", headers=headers)
+        return r.json()
+
+    def workflow_run_sources(self, run_id: str) -> Dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/sources", headers=headers)
+        return r.json()
+
+    def workflow_run_evidence(self, run_id: str) -> Dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/evidence", headers=headers)
         return r.json()

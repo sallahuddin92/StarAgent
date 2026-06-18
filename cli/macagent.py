@@ -691,6 +691,12 @@ def build_parser() -> argparse.ArgumentParser:
     explain_wf = workflow_sub.add_parser("explain", help="Explain workflow details, stages, and safety rules")
     explain_wf.add_argument("name", help="Workflow name")
 
+    sources_wf = workflow_sub.add_parser("sources", help="Retrieve sources collected for a workflow run")
+    sources_wf.add_argument("run_id", help="Workflow Run/Task ID")
+
+    evidence_wf = workflow_sub.add_parser("evidence", help="Retrieve evidence extracted for a workflow run")
+    evidence_wf.add_argument("run_id", help="Workflow Run/Task ID")
+
     research = sub.add_parser("research", help="Document research mode (runs as a task)")
     research_sub = research.add_subparsers(dest="research_cmd", required=True)
 
@@ -708,6 +714,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     research_deep = research_sub.add_parser("deep", help="Run a deep research ICM workflow task")
     research_deep.add_argument("question", help="The deep research question/topic")
+    research_deep.add_argument("--mode", default="live", choices=["live", "test"], help="Execution mode (default: live)")
+    research_deep.add_argument("--url", action="append", dest="urls", help="Manual URL(s) to fetch")
+    research_deep.add_argument("--docs", action="store_true", help="Enable local documentation search")
 
     docs = sub.add_parser("docs", help="Local documentation knowledge base")
     docs_sub = docs.add_subparsers(dest="docs_cmd", required=True)
@@ -1957,6 +1966,16 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(out.get("explanation") or f"No explanation for workflow {args.name}")
                 return 0
 
+            if args.workflow_cmd == "sources":
+                out = client.workflow_run_sources(args.run_id)
+                print(json.dumps(out, ensure_ascii=False, indent=2))
+                return 0
+
+            if args.workflow_cmd == "evidence":
+                out = client.workflow_run_evidence(args.run_id)
+                print(json.dumps(out, ensure_ascii=False, indent=2))
+                return 0
+
         if args.cmd == "research":
             if args.research_cmd == "run":
                 out = client.research_run(
@@ -1983,12 +2002,18 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(json.dumps(out, ensure_ascii=False, indent=2))
                 return 0
             if args.research_cmd == "deep":
+                urls = getattr(args, "urls", []) or []
+                docs = getattr(args, "docs", False)
+                mode = getattr(args, "mode", "live")
                 out = client.workflow_run(
                     name="deep_research",
                     project_id=ctx["project_id"],
                     conversation_id=ctx["conversation_id"],
                     goal=args.question,
-                    definition_of_done="Deep research report generated and verified."
+                    definition_of_done="Deep research report generated and verified.",
+                    mode=mode,
+                    urls=urls,
+                    docs=docs
                 )
                 task_id = out.get("task_id")
                 if task_id:

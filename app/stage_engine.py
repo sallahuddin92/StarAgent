@@ -43,6 +43,18 @@ class StageEngine:
         Status can be "completed", "paused" (requires approval), or "failed".
         """
         stage_name = stage_config["name"]
+        
+        # Check for deep_research live mode
+        if workflow_name == "deep_research" and variables.get("mode") == "live":
+            return await self.execute_live_research_stage(
+                task_id=task_id,
+                stage_config=stage_config,
+                stage_index=stage_index,
+                variables=variables,
+                trace_logger=trace_logger,
+                user_goal=user_goal,
+                progress_queue=progress_queue
+            )
         purpose = stage_config.get("purpose", "")
         allowed_tools = stage_config.get("allowed_tools")
         blocked_tools = stage_config.get("blocked_tools") or []
@@ -397,3 +409,415 @@ class StageEngine:
             
         summary = "\n".join(messages)
         return res["success"], summary, res
+
+    async def execute_live_research_stage(
+        self,
+        task_id: str,
+        stage_config: Dict[str, Any],
+        stage_index: int,
+        variables: Dict[str, Any],
+        trace_logger: WorkflowTraceLogger,
+        user_goal: str,
+        progress_queue: Optional[asyncio.Queue] = None
+    ) -> Tuple[str, Dict[str, Any]]:
+        stage_name = stage_config["name"]
+        purpose = stage_config.get("purpose", "")
+        
+        from .workflow_engine import get_workflow_runtime_dir
+        wf_runtime_dir = get_workflow_runtime_dir(task_id)
+        
+        # Resolve model
+        from .model_router import resolve_capabilities
+        model_id = resolve_capabilities(["local_fast"])
+        trace_logger.log_model_routing(stage_name, model_id)
+        
+        if progress_queue:
+            await progress_queue.put(f"[STAGE_ENGINE] Starting Live Stage: {stage_name}\n")
+            
+        trace_logger.log_stage_start(stage_name, stage_index, model_id, [], [])
+        
+        status = "completed"
+        files_produced = []
+        report_content = f"# Stage Report: {stage_name}\n\nCompleted successfully in live mode."
+        
+        # Checkpoints directory
+        cp_dir = Path(".runtime") / "tasks" / task_id / "checkpoints" / f"{(stage_index+1):02d}_{stage_name}"
+        
+        from app.research_reader import ResearchReader
+        from app.research_providers import LocalDocsProvider, ManualUrlsProvider, WebSearchStubProvider
+        from app.evidence_engine import EvidenceEngine
+        
+        engine = EvidenceEngine(self.llm)
+        question = variables.get("question") or user_goal
+        
+        if stage_name == "scope":
+            # 1. workflow_state.json
+            import datetime as dt
+            wf_state = {
+                "run_id": task_id,
+                "workflow_name": "deep_research",
+                "current_stage_index": stage_index,
+                "variables": variables,
+                "updated_at": dt.datetime.utcnow().isoformat()
+            }
+            wf_state_file = wf_runtime_dir / "workflow_state.json"
+            wf_state_file.write_text(json.dumps(wf_state, indent=2), encoding="utf-8")
+            files_produced.append(str(wf_state_file))
+            
+            # Save checkpoint
+            cp_dir.mkdir(parents=True, exist_ok=True)
+            (cp_dir / "research_brief.md").write_text(
+                f"# Research Brief\n\nQuestion: {question}\nMode: live\nScope: Real deep research with evidence verification.\n",
+                encoding="utf-8"
+            )
+            
+        elif stage_name == "source_plan":
+            docs_enabled = variables.get("docs", False)
+            urls = variables.get("urls") or []
+            
+            # Write sources.json initially (placeholder or resolved manual urls)
+            sources = []
+            if urls:
+                provider = ManualUrlsProvider()
+                sources = provider.search(question, urls=urls)
+            
+            for idx, src in enumerate(sources, start=1):
+                src["source_id"] = f"S{idx}"
+                
+            sources_file = wf_runtime_dir / "sources.json"
+            sources_file.write_text(json.dumps(sources, indent=2), encoding="utf-8")
+            files_produced.append(str(sources_file))
+            
+            # Save checkpoint
+            cp_dir.mkdir(parents=True, exist_ok=True)
+            plan_md = (
+                f"# Source Plan\n\n"
+                f"Question: {question}\n"
+                f"Docs Search Enabled: {docs_enabled}\n"
+                f"Manual URLs: {len(urls)} configured.\n"
+            )
+            (cp_dir / "source_plan.md").write_text(plan_md, encoding="utf-8")
+            
+        elif stage_name == "collect_sources":
+            docs_enabled = variables.get("docs", False)
+            urls = variables.get("urls") or []
+            
+            sources = []
+            if docs_enabled:
+                provider = LocalDocsProvider()
+                sources.extend(provider.search(question, project_id=variables.get("project_id", "default")))
+                
+            if urls:
+                provider = ManualUrlsProvider()
+                sources.extend(provider.search(question, urls=urls))
+                
+            if not docs_enabled and not urls:
+                provider = WebSearchStubProvider()
+                provider.search(question)
+                
+            for idx, src in enumerate(sources, start=1):
+                src["source_id"] = f"S{idx}"
+                
+            reader = ResearchReader()
+            fetched_sources = []
+            for src in sources:
+                res = reader.fetch_and_clean(src["url"], task_id, src["source_id"])
+                src.update(res)
+                fetched_sources.append(src)
+                
+            sources_file = wf_runtime_dir / "sources.json"
+            sources_file.write_text(json.dumps(fetched_sources, indent=2), encoding="utf-8")
+            files_produced.append(str(sources_file))
+            
+            cp_dir.mkdir(parents=True, exist_ok=True)
+            (cp_dir / "sources.json").write_text(json.dumps(fetched_sources, indent=2), encoding="utf-8")
+            
+        elif stage_name == "extract_evidence":
+            sources_file = wf_runtime_dir / "sources.json"
+            sources = []
+            if sources_file.exists():
+                try:
+                    sources = json.loads(sources_file.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+                    
+            evidence_items = await engine.extract_evidence_items(sources, task_id, question, model_id)
+            
+            evidence_items_file = wf_runtime_dir / "evidence_items.json"
+            evidence_items_file.write_text(json.dumps(evidence_items, indent=2), encoding="utf-8")
+            files_produced.append(str(evidence_items_file))
+            
+            table_lines = ["# Evidence Table\n", "| Source | Quote | Assertion | Citation |", "|---|---|---|---|"]
+            for e in evidence_items:
+                table_lines.append(f"| {e['source_id']} | {e['quote']} | {e['assertion']} | [{e['evidence_id']}] |")
+            
+            evidence_table_file = wf_runtime_dir / "evidence_table.md"
+            evidence_table_file.write_text("\n".join(table_lines), encoding="utf-8")
+            files_produced.append(str(evidence_table_file))
+            
+            cp_dir.mkdir(parents=True, exist_ok=True)
+            (cp_dir / "evidence_items.json").write_text(json.dumps(evidence_items, indent=2), encoding="utf-8")
+            
+        elif stage_name == "compare_claims":
+            evidence_items_file = wf_runtime_dir / "evidence_items.json"
+            evidence_items = []
+            if evidence_items_file.exists():
+                try:
+                    evidence_items = json.loads(evidence_items_file.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+                    
+            claims, contradictions = await engine.compare_claims(evidence_items, question, model_id)
+            
+            claims_matrix_file = wf_runtime_dir / "claims_matrix.json"
+            claims_matrix_file.write_text(json.dumps(claims, indent=2), encoding="utf-8")
+            files_produced.append(str(claims_matrix_file))
+            
+            contradictions_file = wf_runtime_dir / "contradictions.json"
+            contradictions_file.write_text(json.dumps(contradictions, indent=2), encoding="utf-8")
+            files_produced.append(str(contradictions_file))
+            
+            matrix_lines = ["# Claims Matrix & Contradiction Analysis\n"]
+            for c in claims:
+                matrix_lines.append(f"- Claim {c['claim_id']}: {c['claim_text']} (Status: {c['status']})")
+                matrix_lines.append(f"  Supporting evidence: {', '.join(c['supporting_evidence_ids'])}")
+            if contradictions:
+                matrix_lines.append("\n## Contradictions")
+                for ct in contradictions:
+                    matrix_lines.append(f"- {ct['description']} (Conflicting: {', '.join(ct['conflicting_evidence_ids'])})")
+                    
+            claims_md_file = wf_runtime_dir / "claims_matrix.md"
+            claims_md_file.write_text("\n".join(matrix_lines), encoding="utf-8")
+            files_produced.append(str(claims_md_file))
+            
+            cp_dir.mkdir(parents=True, exist_ok=True)
+            (cp_dir / "claims_matrix.json").write_text(json.dumps(claims, indent=2), encoding="utf-8")
+            
+        elif stage_name == "synthesize":
+            if not variables.get("approved_synthesize"):
+                claims_file = wf_runtime_dir / "claims_matrix.json"
+                contras_file = wf_runtime_dir / "contradictions.json"
+                claims = []
+                contradictions = []
+                try:
+                    if claims_file.exists():
+                        claims = json.loads(claims_file.read_text(encoding="utf-8"))
+                    if contras_file.exists():
+                        contradictions = json.loads(contras_file.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+                    
+                outline = await engine.synthesize_outline(claims, contradictions, question, model_id)
+                
+                cp_dir.mkdir(parents=True, exist_ok=True)
+                (cp_dir / "analysis.md").write_text(outline, encoding="utf-8")
+                
+                if progress_queue:
+                    await progress_queue.put(f"[STAGE_ENGINE] Stage '{stage_name}' requires human approval before starting.\n")
+                return "paused", variables
+            
+            status = "completed"
+            
+        elif stage_name == "verify_citations":
+            sources_file = wf_runtime_dir / "sources.json"
+            evidence_file = wf_runtime_dir / "evidence_items.json"
+            sources = []
+            evidence_items = []
+            try:
+                if sources_file.exists():
+                    sources = json.loads(sources_file.read_text(encoding="utf-8"))
+                if evidence_file.exists():
+                    evidence_items = json.loads(evidence_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+                
+            outline = ""
+            prev_cp_dir = Path(".runtime") / "tasks" / task_id / "checkpoints" / "06_synthesize"
+            if (prev_cp_dir / "analysis.md").exists():
+                outline = (prev_cp_dir / "analysis.md").read_text(encoding="utf-8")
+                
+            audit = engine.citation_audit(outline, sources, evidence_items)
+            
+            audit_file = wf_runtime_dir / "citation_audit.json"
+            audit_file.write_text(json.dumps(audit, indent=2), encoding="utf-8")
+            files_produced.append(str(audit_file))
+            
+            audit_lines = ["# Citation Audit Report\n"]
+            audit_lines.append(f"Status: {audit['status']}")
+            audit_lines.append(f"Verified Citations: {len(audit['verified_citations'])}")
+            audit_lines.append(f"Unresolved Citations: {len(audit['unresolved'])}")
+            if audit["unresolved"]:
+                audit_lines.append("\n## Unresolved Citations:")
+                for u in audit["unresolved"]:
+                    audit_lines.append(f"- {u}")
+            else:
+                audit_lines.append("\nNo unresolved unsourced claims detected.")
+                
+            audit_md_file = wf_runtime_dir / "citation_audit.md"
+            audit_md_file.write_text("\n".join(audit_lines), encoding="utf-8")
+            files_produced.append(str(audit_md_file))
+            
+            cp_dir.mkdir(parents=True, exist_ok=True)
+            (cp_dir / "citation_audit.json").write_text(json.dumps(audit, indent=2), encoding="utf-8")
+            
+        elif stage_name == "write_report":
+            sources_file = wf_runtime_dir / "sources.json"
+            evidence_file = wf_runtime_dir / "evidence_items.json"
+            claims_file = wf_runtime_dir / "claims_matrix.json"
+            contras_file = wf_runtime_dir / "contradictions.json"
+            
+            sources = []
+            evidence_items = []
+            claims = []
+            contradictions = []
+            
+            try:
+                if sources_file.exists():
+                    sources = json.loads(sources_file.read_text(encoding="utf-8"))
+                if evidence_file.exists():
+                    evidence_items = json.loads(evidence_file.read_text(encoding="utf-8"))
+                if claims_file.exists():
+                    claims = json.loads(claims_file.read_text(encoding="utf-8"))
+                if contras_file.exists():
+                    contradictions = json.loads(contras_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+                
+            if not sources:
+                report = (
+                    f"# Deep Research: {question}\n\n"
+                    f"No configured live sources were available.\n"
+                )
+                variables["status"] = "completed_with_limitations"
+            else:
+                outline = ""
+                prev_cp_dir = Path(".runtime") / "tasks" / task_id / "checkpoints" / "06_synthesize"
+                if (prev_cp_dir / "analysis.md").exists():
+                    outline = (prev_cp_dir / "analysis.md").read_text(encoding="utf-8")
+                report = await engine.write_final_report(question, sources, evidence_items, claims, contradictions, outline, model_id)
+                
+            report_file = wf_runtime_dir / "final_report.md"
+            report_file.write_text(report, encoding="utf-8")
+            files_produced.append(str(report_file))
+            
+            audit = engine.citation_audit(report, sources, evidence_items)
+            audit_file = wf_runtime_dir / "citation_audit.json"
+            audit_file.write_text(json.dumps(audit, indent=2), encoding="utf-8")
+            
+            cp_dir.mkdir(parents=True, exist_ok=True)
+            (cp_dir / "final_report.md").write_text(report, encoding="utf-8")
+            
+        elif stage_name == "review":
+            if not variables.get("approved_review"):
+                cp_dir.mkdir(parents=True, exist_ok=True)
+                (cp_dir / "review.md").write_text(
+                    f"# Research Review\n\nQuestion: {question}\nStatus: Waiting for final review approval.\n",
+                    encoding="utf-8"
+                )
+                if progress_queue:
+                    await progress_queue.put(f"[STAGE_ENGINE] Stage '{stage_name}' requires human approval before starting.\n")
+                return "paused", variables
+            
+            status = "completed"
+            
+        verifier_ok, verifier_msg, gate_res = self.run_verification_v050(
+            stage_config=stage_config,
+            task_id=task_id,
+            files_produced=files_produced,
+            stage_output="",
+            citations=[],
+            variables=variables
+        )
+        
+        gate_res_file = wf_runtime_dir / "gate_results.json"
+        gate_results = {}
+        if gate_res_file.exists():
+            try:
+                gate_results = json.loads(gate_res_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        gate_results[stage_name] = gate_res
+        gate_res_file.write_text(json.dumps(gate_results, indent=2), encoding="utf-8")
+        
+        trace_logger.log_stage_verifier(stage_config.get("verifier", "always_pass"), verifier_ok, verifier_msg)
+        
+        if progress_queue:
+            icon = "✅" if verifier_ok else "❌"
+            await progress_queue.put(f"[STAGE_VERIFIER] {icon} Verifier Result ({stage_config.get('verifier')}): {verifier_msg}\n")
+            
+        if not verifier_ok:
+            status = "failed"
+            
+        save_stage_checkpoint(
+            task_id=task_id,
+            workflow_name="deep_research",
+            stage_name=stage_name,
+            stage_index=stage_index,
+            status=status,
+            variables=variables,
+            files_produced=files_produced,
+            trace_data={
+                "stage_name": stage_name,
+                "model": model_id,
+                "verifier_result": {"ok": verifier_ok, "message": verifier_msg}
+            },
+            report_content=report_content
+        )
+        
+        cp_dir.mkdir(parents=True, exist_ok=True)
+        if stage_name == "scope":
+            (cp_dir / "research_brief.md").write_text(
+                f"# Research Brief\n\nQuestion: {question}\nMode: live\nScope: Real deep research with evidence verification.\n",
+                encoding="utf-8"
+            )
+        elif stage_name == "source_plan":
+            docs_enabled = variables.get("docs", False)
+            urls = variables.get("urls") or []
+            plan_md = (
+                f"# Source Plan\n\n"
+                f"Question: {question}\n"
+                f"Docs Search Enabled: {docs_enabled}\n"
+                f"Manual URLs: {len(urls)} configured.\n"
+            )
+            (cp_dir / "source_plan.md").write_text(plan_md, encoding="utf-8")
+        elif stage_name == "collect_sources":
+            sources_file = wf_runtime_dir / "sources.json"
+            if sources_file.exists():
+                (cp_dir / "sources.json").write_text(sources_file.read_text(encoding="utf-8"), encoding="utf-8")
+        elif stage_name == "extract_evidence":
+            evidence_file = wf_runtime_dir / "evidence_items.json"
+            if evidence_file.exists():
+                (cp_dir / "evidence_items.json").write_text(evidence_file.read_text(encoding="utf-8"), encoding="utf-8")
+        elif stage_name == "compare_claims":
+            claims_file = wf_runtime_dir / "claims_matrix.json"
+            if claims_file.exists():
+                (cp_dir / "claims_matrix.json").write_text(claims_file.read_text(encoding="utf-8"), encoding="utf-8")
+        elif stage_name == "synthesize":
+            claims_file = wf_runtime_dir / "claims_matrix.json"
+            contras_file = wf_runtime_dir / "contradictions.json"
+            claims = []
+            contradictions = []
+            try:
+                if claims_file.exists():
+                    claims = json.loads(claims_file.read_text(encoding="utf-8"))
+                if contras_file.exists():
+                    contradictions = json.loads(contras_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+            outline = await engine.synthesize_outline(claims, contradictions, question, model_id)
+            (cp_dir / "analysis.md").write_text(outline, encoding="utf-8")
+        elif stage_name == "verify_citations":
+            audit_file = wf_runtime_dir / "citation_audit.json"
+            if audit_file.exists():
+                (cp_dir / "citation_audit.json").write_text(audit_file.read_text(encoding="utf-8"), encoding="utf-8")
+        elif stage_name == "write_report":
+            report_file = wf_runtime_dir / "final_report.md"
+            if report_file.exists():
+                (cp_dir / "final_report.md").write_text(report_file.read_text(encoding="utf-8"), encoding="utf-8")
+        elif stage_name == "review":
+            (cp_dir / "review.md").write_text(
+                f"# Research Review\n\nQuestion: {question}\nStatus: Approved.\n",
+                encoding="utf-8"
+            )
+            
+        return status, variables

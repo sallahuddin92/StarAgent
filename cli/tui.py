@@ -222,6 +222,64 @@ def draw_details(run_details: Optional[Dict[str, Any]], gates_data: Optional[Dic
     info_text.append("\nStages Progress:\n", style="bold cyan")
     info_text.append(stages_bar)
     
+    # Deep Research metrics
+    if workflow_name == "deep_research":
+        wf_dir = Path(".runtime") / "workflows" / run_id
+        sources_path = wf_dir / "sources.json"
+        evidence_path = wf_dir / "evidence_items.json"
+        contra_path = wf_dir / "contradictions.json"
+        audit_path = wf_dir / "citation_audit.json"
+        report_path = wf_dir / "final_report.md"
+        
+        num_sources = "0"
+        if sources_path.exists():
+            try:
+                sources = json.loads(sources_path.read_text(encoding="utf-8"))
+                num_sources = str(len(sources))
+            except Exception:
+                num_sources = "Error"
+                
+        num_evidence = "0"
+        if evidence_path.exists():
+            try:
+                evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+                num_evidence = str(len(evidence))
+            except Exception:
+                num_evidence = "Error"
+                
+        num_contradictions = "0"
+        if contra_path.exists():
+            try:
+                contras = json.loads(contra_path.read_text(encoding="utf-8"))
+                num_contradictions = str(len(contras))
+            except Exception:
+                num_contradictions = "Error"
+                
+        audit_status = "Not Run"
+        if audit_path.exists():
+            try:
+                audit = json.loads(audit_path.read_text(encoding="utf-8"))
+                unresolved = audit.get("unresolved", [])
+                if unresolved:
+                    audit_status = f"Failed ({len(unresolved)} unresolved)"
+                else:
+                    audit_status = "Passed"
+            except Exception:
+                audit_status = "Error"
+                
+        current_idx = run_details.get("current_stage_index", 0)
+        current_stage_name = "None"
+        if current_idx < len(stages):
+            current_stage_name = stages[current_idx].get("stage_name") or stages[current_idx].get("name") or "None"
+            
+        report_path_str = str(report_path) if report_path.exists() else "Not generated"
+        
+        info_text.append("\n\nDeep Research Metrics:\n", style="bold magenta")
+        info_text.append(f" - Research Stage: {current_stage_name}\n")
+        info_text.append(f" - Sources: {num_sources}  |  Evidence Items: {num_evidence}  |  Contradictions: {num_contradictions}\n")
+        info_text.append(f" - Citation Audit: {audit_status}\n")
+        info_text.append(f" - Report Path: {report_path_str}\n")
+    
     # Check if action required
     is_paused = status == "paused"
     action_panel = None

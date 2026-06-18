@@ -1848,7 +1848,11 @@ async def run_workflow(request: Request, authorization: Optional[str] = Header(d
         "current_stage_index": 0,
         "variables": {
             "project_id": project_id,
-            "docs_context": ""
+            "docs_context": "",
+            "mode": body.get("mode", "test"),  # Default to test for safety/backward compatibility
+            "urls": body.get("urls", []),
+            "docs": body.get("docs", False),
+            "question": goal
         }
     }
     
@@ -1990,6 +1994,32 @@ async def get_workflow_report(run_id: str, authorization: Optional[str] = Header
         return {"report": report_content}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read final report: {e}")
+
+@app.get("/v1/workflows/{run_id}/sources")
+async def get_workflow_sources(run_id: str, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    wf_dir = Path(".runtime") / "workflows" / run_id
+    sources_file = wf_dir / "sources.json"
+    if not sources_file.exists():
+        raise HTTPException(status_code=404, detail=f"Sources for run '{run_id}' not found.")
+    try:
+        sources_content = json.loads(sources_file.read_text(encoding="utf-8"))
+        return {"sources": sources_content}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read sources: {e}")
+
+@app.get("/v1/workflows/{run_id}/evidence")
+async def get_workflow_evidence(run_id: str, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    wf_dir = Path(".runtime") / "workflows" / run_id
+    evidence_file = wf_dir / "evidence_items.json"
+    if not evidence_file.exists():
+        raise HTTPException(status_code=404, detail=f"Evidence for run '{run_id}' not found.")
+    try:
+        evidence_content = json.loads(evidence_file.read_text(encoding="utf-8"))
+        return {"evidence": evidence_content}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read evidence: {e}")
 
 @app.get("/v1/workflows/{run_id}/gates")
 async def get_workflow_run_gates(run_id: str, authorization: Optional[str] = Header(default=None)):

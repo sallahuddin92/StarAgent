@@ -618,7 +618,11 @@ class WorkflowEngine:
         user_goal = tr.get("user_goal", "")
         art = tr.get("artifacts_json") or {}
         workflow_name = art.get("workflow_name")
-        if self._is_simple_task(user_goal) or workflow_name == "deep_research" or "deep_research" in user_goal.lower() or "deep research" in user_goal.lower():
+        variables = art.get("variables") or {}
+        mode = variables.get("mode", "test")
+        
+        is_deep_research = (workflow_name == "deep_research" or "deep_research" in user_goal.lower() or "deep research" in user_goal.lower())
+        if self._is_simple_task(user_goal) or (is_deep_research and mode == "test"):
             return await self._run_simple_task_fast_path(task_id, user_goal, progress_queue)
 
         # Load workflow metadata from artifacts_json
@@ -806,13 +810,22 @@ class WorkflowEngine:
 
         # Check if all stages finished
         if current_stage_idx >= len(stages):
+            final_status = "completed"
             final_summary = f"Workflow '{workflow_name}' executed and verified all stages successfully."
+            
+            if workflow_name == "deep_research" and variables.get("status") == "completed_with_limitations":
+                final_status = "completed_with_limitations"
+                final_summary = "Workflow deep_research completed with limitations: No configured live sources were available."
+            elif workflow_name == "deep_research" and variables.get("status") == "failed_with_reason":
+                final_status = "failed_with_reason"
+                final_summary = f"Workflow deep_research failed: {variables.get('failed_reason')}"
+                
             self.db.update_task_run(task_id, {
-                "status": "completed",
-                "final_verdict": "completed",
+                "status": final_status,
+                "final_verdict": final_status,
                 "final_summary": final_summary
             })
-            trace_logger.log_workflow_end("completed", final_summary)
+            trace_logger.log_workflow_end(final_status, final_summary)
         else:
             self.db.update_task_run(task_id, {"status": "paused"})
             
