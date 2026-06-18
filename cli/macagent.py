@@ -216,6 +216,76 @@ def _release_lock(lock_file_obj, lock_path: str):
             pass
 
 
+def _dispatch_benchmark(args, client, ctx) -> int:
+    """Dispatch benchmark subcommands via API."""
+    import json as _json
+    try:
+        if args.benchmark_cmd == "list":
+            r = client.benchmark_list()
+            cases = r.get("cases", [])
+            if cases:
+                print("Available benchmark cases:")
+                for c in cases:
+                    print(f"  - {c}")
+            else:
+                print("No benchmark cases found.")
+            if args.as_json:
+                print(_json.dumps(r, indent=2))
+            return 0
+
+        if args.benchmark_cmd == "run":
+            r = client.benchmark_run(args.case_name)
+            print(_json.dumps(r, indent=2) if args.as_json else f"Started benchmark run: {r.get('run_id', 'unknown')}")
+            return 0
+
+        if args.benchmark_cmd == "score":
+            r = client.benchmark_score(args.run_id)
+            scores = r.get("scores", r)
+            if args.as_json:
+                print(_json.dumps(r, indent=2))
+            else:
+                print(f"Benchmark score for run '{args.run_id}':")
+                for k, v in scores.items():
+                    print(f"  {k}: {v}")
+            return 0
+
+        if args.benchmark_cmd == "history":
+            r = client.benchmark_history()
+            runs = r.get("runs", r) if isinstance(r, dict) else r
+            if not runs:
+                print("No benchmark runs found.")
+                return 0
+            if args.as_json:
+                print(_json.dumps(runs, indent=2))
+            else:
+                print(f"{'Run ID':<12} {'Case':<25} {'Score':<8} {'Timestamp':<20}")
+                print("-" * 65)
+                for run in runs:
+                    ts = run.get("timestamp", "")
+                    print(f"{run.get('run_id', ''):<12} {run.get('case_name', ''):<25} {str(run.get('overall_score', '')):<8} {ts:<20}")
+            return 0
+
+        if args.benchmark_cmd == "compare":
+            r = client.benchmark_compare(args.run_id_a, args.run_id_b)
+            if args.as_json:
+                print(_json.dumps(r, indent=2))
+            else:
+                print(f"Comparison: {r.get('run_id_a')} vs {r.get('run_id_b')}")
+                deltas = r.get("deltas", {})
+                for metric, d in sorted(deltas.items()):
+                    arrow = "↓" if d.get("delta", 0) < 0 else "↑" if d.get("delta", 0) > 0 else "→"
+                    print(f"  {metric}: {d['run_a']} → {d['run_b']} ({d['delta']:+}) {arrow}")
+                if r.get("regression"):
+                    print("\n⚠️  REGRESSION DETECTED:")
+                    for detail in r.get("regression_details", []):
+                        print(f"  - {detail}")
+            return 0
+    except Exception as e:
+        print(f"Benchmark error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _run_doctor(client: MacAgentClient, ctx: Dict[str, str], *, as_json: bool = False) -> int:
     checks: list[Dict[str, Any]] = []
 
@@ -520,6 +590,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     eval_cmd = sub.add_parser("eval", help="Run eval suite")
     eval_cmd.add_argument("suite", choices=["all", "baseline", "medium", "repo", "stress", "gates", "skills"], help="Which eval suite to run")
+
+    benchmark_cmd = sub.add_parser("benchmark", help="Run research benchmark suite")
+    benchmark_sub = benchmark_cmd.add_subparsers(dest="benchmark_cmd", required=True)
+    benchmark_sub.add_parser("list", help="List available benchmark cases")
+    bm_run = benchmark_sub.add_parser("run", help="Run a benchmark case")
+    bm_run.add_argument("case_name", nargs="?", default=None, help="Case name to run (default: all)")
+    bm_score = benchmark_sub.add_parser("score", help="Score a completed benchmark run")
+    bm_score.add_argument("run_id", help="Run ID from benchmark run")
+    benchmark_sub.add_parser("history", help="Show benchmark run history")
+    bm_compare = benchmark_sub.add_parser("compare", help="Compare two benchmark runs")
+    bm_compare.add_argument("run_id_a", help="First run ID")
+    bm_compare.add_argument("run_id_b", help="Second run ID")
 
     skills_cmd = sub.add_parser("skills", help="Skill library management")
     skills_sub = skills_cmd.add_subparsers(dest="skills_cmd", required=True)
@@ -1322,6 +1404,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 test_file = os.path.join(script_dir, "tests", "test_skill_library.py")
                 rc = subprocess.run(["python3", "-m", "pytest", test_file, "-v"], cwd=script_dir).returncode
             return rc
+        if args.cmd == "benchmark":
+            return _dispatch_benchmark(args, client, ctx)
         if args.cmd == "skills":
             sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             from app import skill_library

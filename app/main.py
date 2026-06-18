@@ -2282,3 +2282,192 @@ async def replay_workflow_run(run_id: str, authorization: Optional[str] = Header
         "stages": stages,
         "events": events[:500],  # cap to avoid oversized response
     }
+
+
+# =============================================================================
+# v0.6.3 — Research Benchmark Endpoints
+# =============================================================================
+
+@app.get("/v1/benchmarks")
+async def list_benchmarks(authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    from app.benchmark_engine import BenchmarkEngine
+    cases = BenchmarkEngine.list_cases()
+    return {"cases": cases}
+
+
+@app.post("/v1/benchmarks/run")
+async def run_benchmark(request: Request, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    body = await request.json()
+    case_name = body.get("case_name")
+    from app.benchmark_engine import BenchmarkEngine
+
+    if case_name:
+        try:
+            case = BenchmarkEngine.load_case(case_name)
+        except Exception as e:
+            return JSONResponse(status_code=400, content={"error": f"Cannot load case '{case_name}': {e}"})
+        run_id = str(uuid.uuid4())[:8]
+        return await _run_benchmark_case_async(run_id, case, case_name)
+    else:
+        # Run all cases
+        try:
+            cases = BenchmarkEngine.list_cases()
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"error": f"Cannot list benchmark cases: {e}"})
+        results = []
+        for cn in cases:
+            try:
+                case = BenchmarkEngine.load_case(cn)
+                run_id = str(uuid.uuid4())[:8]
+                result = await _run_benchmark_case_async(run_id, case, cn)
+                results.append(result)
+            except Exception as e:
+                results.append({"case_name": cn, "error": str(e)})
+        return {"results": results}
+
+
+async def _run_benchmark_case_async(run_id: str, case: dict, case_name: str) -> dict:
+    """Run a single benchmark case with proper async handling."""
+    import json
+    import shutil
+    from pathlib import Path
+    from app.benchmark_engine import BenchmarkEngine, BENCHMARK_RUNS_DIR, WORKFLOW_RUNS_DIR
+
+    question = case["question"]
+    sources = case["sources"]
+    expected = case.get("expected", {})
+    urls = [f"file://{s['path']}" for s in sources]
+
+    # Create a task run using the workflow engine
+    task_id = run_id
+    art = {
+        "workflow_name": "deep_research",
+        "current_stage_index": 0,
+        "variables": {
+            "project_id": "benchmark",
+            "docs_context": "",
+            "mode": "live",
+            "urls": urls,
+            "docs": False,
+            "question": question,
+        },
+    }
+    db.create_task_run({
+        "task_id": task_id,
+        "project_id": "benchmark",
+        "conversation_id": f"benchmark-{run_id}",
+        "task_type": "workflow",
+        "user_goal": question,
+        "definition_of_done": "Deep research report generated and verified.",
+        "max_steps": 9,
+        "max_retries": 1,
+        "artifacts_json": art,
+    })
+
+    # Execute workflow with auto-approve loop
+    wf_result = None
+    try:
+        wf_result = await workflow_engine.execute_workflow(task_id)
+        # Auto-approve and resume if paused
+        for _ in range(10):
+            status = None
+            if isinstance(wf_result, dict):
+                status = wf_result.get("status") or wf_result.get("final_verdict")
+            if status in ("completed", "failed", "cancelled"):
+                break
+            # Check task DB record for current stage
+            task_record = db.get_task_run(task_id)
+            if task_record:
+                art_data = task_record.get("artifacts_json") or {}
+                wf_name = art_data.get("workflow_name", "deep_research")
+                wf = workflow_engine.inspect_workflow(wf_name)
+                stages = wf.get("stages") if wf else []
+                idx = art_data.get("current_stage_index", 0)
+                if idx < len(stages):
+                    stage_name = stages[idx]["name"]
+                    workflow_engine.approve_stage(task_id, stage_name)
+                    wf_result = await workflow_engine.resume_workflow(task_id)
+                    continue
+            break
+    except Exception as wf_err:
+        wf_result = {"error": str(wf_err), "status": "failed"}
+
+    # Copy output files to .runtime/benchmarks/<run_id>/
+    wf_dir = WORKFLOW_RUNS_DIR / run_id
+    bench_dir = BENCHMARK_RUNS_DIR / run_id
+    bench_dir.mkdir(parents=True, exist_ok=True)
+
+    file_map = {
+        "final_report.md": "generated_report.md",
+        "sources.json": "sources.json",
+        "evidence_items.json": "evidence_items.json",
+    }
+    for src_name, dst_name in file_map.items():
+        src = wf_dir / src_name
+        dst = bench_dir / dst_name
+        if src.is_file():
+            try:
+                shutil.copy2(str(src), str(dst))
+            except Exception as copy_err:
+                dst.write_text("", encoding="utf-8")
+        else:
+            dst.write_text("", encoding="utf-8")
+
+    # Write benchmark result metadata
+    result_data = {
+        "run_id": run_id,
+        "case_name": case_name,
+        "question": question,
+        "source_count": len(sources),
+        "expected": expected,
+        "workflow_result": wf_result if isinstance(wf_result, dict) else {"raw": str(wf_result)},
+        "timestamp": time.time(),
+    }
+    try:
+        (bench_dir / "benchmark_result.json").write_text(json.dumps(result_data, indent=2), encoding="utf-8")
+    except Exception as meta_err:
+        return {"run_id": run_id, "case_name": case_name, "error": f"Failed to write benchmark_result.json: {meta_err}"}
+
+    # Score the run
+    try:
+        scores = BenchmarkEngine.score_run(run_id)
+    except Exception as score_err:
+        scores = {"error": str(score_err)}
+
+    return {"run_id": run_id, "case_name": case_name, "scores": scores}
+
+
+@app.get("/v1/benchmarks/{run_id}/score")
+async def get_benchmark_score(run_id: str, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    from app.benchmark_engine import BenchmarkEngine
+    try:
+        scores = BenchmarkEngine.score_run(run_id)
+        return {"run_id": run_id, "scores": scores}
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/v1/benchmarks/history")
+async def benchmark_history(authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    from app.benchmark_engine import BenchmarkEngine
+    runs = BenchmarkEngine.history()
+    return {"runs": runs}
+
+
+@app.post("/v1/benchmarks/compare")
+async def compare_benchmarks(request: Request, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    body = await request.json()
+    run_id_a = body.get("run_id_a")
+    run_id_b = body.get("run_id_b")
+    if not run_id_a or not run_id_b:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Both run_id_a and run_id_b required")
+    from app.benchmark_engine import BenchmarkEngine
+    comparison = BenchmarkEngine.compare_runs(run_id_a, run_id_b)
+    return comparison

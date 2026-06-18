@@ -1121,3 +1121,37 @@ class MacAgentClient:
         headers = {"Authorization": f"Bearer {self.config.api_key}"}
         r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/replay", headers=headers)
         return r.json()
+
+    # =========================================================================
+    # Benchmark Suite
+    # =========================================================================
+
+    def benchmark_list(self) -> Dict[str, Any]:
+        """List available benchmark cases."""
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/benchmarks", headers=headers)
+        return r.json()
+
+    def benchmark_run(self, case_name: Optional[str] = None) -> Dict[str, Any]:
+        """Run a benchmark case (or all cases if None)."""
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        r = self._http.post(f"{self.v1_base_url}/benchmarks/run", json={"case_name": case_name}, headers=headers)
+        return r.json()
+
+    def benchmark_score(self, run_id: str) -> Dict[str, Any]:
+        """Get scores for a completed benchmark run."""
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/benchmarks/{run_id}/score", headers=headers)
+        return r.json()
+
+    def benchmark_history(self) -> Dict[str, Any]:
+        """List all completed benchmark runs."""
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/benchmarks/history", headers=headers)
+        return r.json()
+
+    def benchmark_compare(self, run_id_a: str, run_id_b: str) -> Dict[str, Any]:
+        """Compare two benchmark runs and detect regression."""
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        r = self._http.post(f"{self.v1_base_url}/benchmarks/compare", json={"run_id_a": run_id_a, "run_id_b": run_id_b}, headers=headers)
+        return r.json()

@@ -1,0 +1,16 @@
+{
+  "required_claims": [
+    "SQLite is serverless",
+    "SQLite is zero-configuration",
+    "PostgreSQL uses a client-server architecture",
+    "PostgreSQL supports high concurrency"
+  ],
+  "forbidden_claims": [
+    "SQLite handles terabytes of data efficiently",
+    "PostgreSQL is serverless"
+  ],
+  "required_citations": true,
+  "min_sources": 2,
+  "min_evidence": 2,
+  "required_sections": ["Summary", "Key Findings", "Evidence Table", "Limitations", "Citations", "Source List"]
+}
