@@ -293,21 +293,79 @@ class EvidenceEngine:
         return evidence_items
 
     def _rule_based_extract(self, content: str, question: str) -> List[Dict[str, Any]]:
-        keywords = [w.lower() for w in question.split() if len(w) > 3]
-        sentences = re.split(r'(?<=[.!?])\s+', content)
+        """Extract evidence from markdown content using rule-based parsing.
+
+        Handles bullet lists, table rows, and paragraphs. Each yields a
+        (quote, assertion) pair where the assertion is a concise factual
+        claim derived from the quote.
+        """
+        lines = content.splitlines()
         extracted = []
-        for s in sentences:
-            s_clean = s.strip()
-            if not s_clean:
+
+        def make_assertion(text: str) -> str:
+            """Derive a concise factual assertion from source text."""
+            # Strip leading bullet markers, bold, and headings
+            clean = re.sub(r'^[\s*\-]+\*{0,2}', '', text).strip()
+            clean = re.sub(r'\*{2}', '', clean)
+            # Take first sentence
+            first_sent = re.split(r'(?<=[.!?])\s+', clean)[0].strip()
+            # Strip trailing colon (from definition-list bullets)
+            first_sent = first_sent.rstrip(':')
+            # Limit length
+            if len(first_sent) > 150:
+                first_sent = first_sent[:147] + "..."
+            return first_sent if len(first_sent) > 10 else text.strip()[:150]
+
+        # 1. Extract bullet items
+        for line in lines:
+            stripped = line.strip()
+            # Match lines starting with - or * (markdown bullets)
+            bullet = re.match(r'^[\s]*[-*+]\s+(.*)', stripped)
+            if bullet:
+                item = bullet.group(1).strip()
+                # Skip if it's just a heading-like bullet
+                if len(item) > 10 and not item.startswith('#'):
+                    assertion = make_assertion(item)
+                    extracted.append({"quote": item, "assertion": assertion})
+
+        # 2. Extract table rows (lines containing | with meaningful content)
+        for line in lines:
+            stripped = line.strip()
+            if stripped.count('|') >= 2 and '---' not in stripped:
+                cells = [c.strip() for c in stripped.split('|') if c.strip()]
+                if len(cells) >= 2:
+                    row_text = " | ".join(cells)
+                    if len(row_text) > 15:
+                        assertion = make_assertion(cells[0])
+                        extracted.append({"quote": row_text, "assertion": assertion})
+
+        # 3. Extract meaningful paragraphs (skip headings, short lines, bullets)
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
                 continue
-            if any(kw in s_clean.lower() for kw in keywords) or not keywords:
-                # Limit length of sentence in case of formatting bugs
-                if len(s_clean) > 10 and len(s_clean) < 300:
-                    extracted.append({
-                        "quote": s_clean,
-                        "assertion": s_clean
-                    })
-        return extracted[:5] # Max 5 items per source for fallback
+            # Skip headings, bullets (already handled), table rows, short lines
+            if stripped.startswith('#'):
+                continue
+            if re.match(r'^[\s]*[-*+]', stripped):
+                continue
+            if '|' in stripped:
+                continue
+            if len(stripped) < 20 or len(stripped) > 500:
+                continue
+            # Must be a non-empty paragraph
+            assertion = make_assertion(stripped)
+            extracted.append({"quote": stripped, "assertion": assertion})
+
+        # Deduplicate by quote (exact match)
+        seen = set()
+        deduped = []
+        for item in extracted:
+            if item["quote"] not in seen:
+                seen.add(item["quote"])
+                deduped.append(item)
+
+        return deduped[:10]  # Max 10 items per source for fallback
 
     async def compare_claims(
         self,

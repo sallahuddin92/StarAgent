@@ -656,3 +656,45 @@ class GateEngine:
             return "warning", "Report contains no evidence citations despite having accepted evidence available."
 
         return "pass", "All cited evidence IDs are in the accepted evidence set."
+
+    # ── v0.8.0 Claim Graph Gates ──────────────────────────────────
+
+    def _gate_claim_graph_exists(self, args: Dict[str, Any], context: Dict[str, Any]) -> Tuple[str, str]:
+        """Check that claim_graph.json exists for the run."""
+        run_id = context.get("run_id") or ""
+        graph_path = self._get_workspace_path(f".runtime/workflows/{run_id}/claim_graph.json")
+        if graph_path.exists():
+            return "pass", "claim_graph.json exists."
+        return "fail", f"claim_graph.json does not exist at {graph_path}"
+
+    def _gate_supported_claims_min(self, args: Dict[str, Any], context: Dict[str, Any]) -> Tuple[str, str]:
+        """Check that the number of supported claims meets minimum."""
+        run_id = context.get("run_id") or ""
+        min_count = args.get("min_count", 3)
+        graph_path = self._get_workspace_path(f".runtime/workflows/{run_id}/claim_graph.json")
+        if not graph_path.exists():
+            return "fail", "claim_graph.json not found."
+        try:
+            graph = json.loads(graph_path.read_text(encoding="utf-8"))
+            supported = sum(1 for c in graph.get("claims", []) if c.get("status") == "supported")
+            if supported >= min_count:
+                return "pass", f"Found {supported} supported claims (minimum required: {min_count})."
+            return "fail", f"Found {supported} supported claims, below minimum {min_count}."
+        except Exception as e:
+            return "fail", f"Failed to read claim_graph.json: {e}"
+
+    def _gate_contradicted_claims_max(self, args: Dict[str, Any], context: Dict[str, Any]) -> Tuple[str, str]:
+        """Check that contradicted claims do not exceed maximum."""
+        run_id = context.get("run_id") or ""
+        max_count = args.get("max_count", 0)
+        graph_path = self._get_workspace_path(f".runtime/workflows/{run_id}/claim_graph.json")
+        if not graph_path.exists():
+            return "fail", "claim_graph.json not found."
+        try:
+            graph = json.loads(graph_path.read_text(encoding="utf-8"))
+            contradicted = sum(1 for c in graph.get("claims", []) if c.get("status") == "contradicted")
+            if contradicted <= max_count:
+                return "pass", f"Found {contradicted} contradicted claims (maximum allowed: {max_count})."
+            return "fail", f"Found {contradicted} contradicted claims, exceeding maximum {max_count}."
+        except Exception as e:
+            return "fail", f"Failed to read claim_graph.json: {e}"

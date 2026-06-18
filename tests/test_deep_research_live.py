@@ -50,14 +50,14 @@ def test_evidence_extraction_and_json():
     with tempfile.TemporaryDirectory() as tmpdir:
         src_file = Path(tmpdir) / "source_text.txt"
         src_file.write_text("StarAgent is an agentic AI coding assistant developed by Google DeepMind.", encoding="utf-8")
-        
+
         sources = [{
             "source_id": "S1",
             "title": "Google DeepMind release",
             "url": "https://deepmind.google/staragent",
             "file_path": str(src_file)
         }]
-        
+
         engine = EvidenceEngine(llm_client=None)
         items = async_to_sync(
             engine.extract_evidence_items(sources, "test_run", "Who developed StarAgent?", "mock_model")
@@ -66,6 +66,103 @@ def test_evidence_extraction_and_json():
         assert items[0]["source_id"] == "S1"
         assert items[0]["evidence_id"] == "E1"
         assert "StarAgent" in items[0]["quote"]
+
+
+def test_markdown_bullets_extract_evidence():
+    """Rule-based extraction should handle markdown bullet points."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        src_file = Path(tmpdir) / "bullets.md"
+        src_file.write_text(
+            "# Key Features\n\n"
+            "- **Serverless**: No separate server process.\n"
+            "- **Zero Configuration**: No setup required.\n"
+            "- **ACID Compliant**: Transactions are atomic.\n"
+            "- **Single Writer**: Only one writer at a time.\n"
+            "- **Lightweight**: Library size under 600KB.\n",
+            encoding="utf-8",
+        )
+        sources = [{"source_id": "S1", "title": "Features", "url": "file:///bullets", "file_path": str(src_file)}]
+        engine = EvidenceEngine(llm_client=None)
+        items = async_to_sync(
+            engine.extract_evidence_items(sources, "test_bullets", "What are the features?", "mock_model")
+        )
+        assert len(items) >= 3, f"Expected at least 3 evidence items from bullets, got {len(items)}"
+        for item in items:
+            assert item.get("assertion"), "Missing assertion"
+
+
+def test_markdown_tables_extract_evidence():
+    """Rule-based extraction should handle markdown table rows."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        src_file = Path(tmpdir) / "table.md"
+        src_file.write_text(
+            "# Comparison Table\n\n"
+            "| Aspect | SQLite | PostgreSQL |\n"
+            "|--------|--------|------------|\n"
+            "| Setup | None | Requires configuration |\n"
+            "| Concurrency | Single writer | Many concurrent writers |\n"
+            "| Management | File-based | Server-based |\n"
+            "| Cost | Free | Free, hosting costs apply |\n",
+            encoding="utf-8",
+        )
+        sources = [{"source_id": "S1", "title": "Comparison", "url": "file:///table", "file_path": str(src_file)}]
+        engine = EvidenceEngine(llm_client=None)
+        items = async_to_sync(
+            engine.extract_evidence_items(sources, "test_table", "Compare SQLite and PostgreSQL", "mock_model")
+        )
+        assert len(items) >= 2, f"Expected at least 2 evidence items from table, got {len(items)}"
+
+
+def test_multi_source_evidence_accepted_count():
+    """Multiple benchmark markdown files should produce accepted evidence >= 3."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        src_files = {
+            "sqlite.md": (
+                "# SQLite Overview\n\n"
+                "SQLite is a serverless SQL database. It requires zero configuration.\n\n"
+                "## Key Characteristics\n\n"
+                "- **Serverless**: No separate server process.\n"
+                "- **Zero Configuration**: No setup or administration required.\n"
+                "- **ACID Compliant**: Transactions are atomic and durable.\n"
+                "- **Lightweight**: Library size under 600KB.\n"
+            ),
+            "postgres.md": (
+                "# PostgreSQL Overview\n\n"
+                "PostgreSQL is an open-source database with client-server architecture.\n\n"
+                "## Key Characteristics\n\n"
+                "- **Client-Server**: Runs as a separate server process.\n"
+                "- **High Concurrency**: Supports many concurrent writers.\n"
+                "- **Full ACID**: Strong transaction guarantees with MVCC.\n"
+                "- **Advanced Features**: Full-text search, JSON support.\n"
+            ),
+            "comparison.md": (
+                "# Comparison Notes\n\n"
+                "## Trade-offs Summary\n\n"
+                "| Aspect | SQLite | PostgreSQL |\n"
+                "|--------|--------|------------|\n"
+                "| Setup | None | Requires configuration |\n"
+                "| Concurrency | Single writer | Many concurrent writers |\n"
+                "| Scalability | Single machine | Horizontal scaling |\n"
+            ),
+        }
+        sources = []
+        for fname, content in src_files.items():
+            path = Path(tmpdir) / fname
+            path.write_text(content, encoding="utf-8")
+            sid = fname.replace(".md", "").upper()
+            sources.append({"source_id": sid, "title": fname, "url": f"file:///{fname}", "file_path": str(path)})
+
+        engine = EvidenceEngine(llm_client=None)
+        items = async_to_sync(
+            engine.extract_evidence_items(
+                sources, "test_multi", "Compare SQLite and PostgreSQL tradeoffs", "mock_model"
+            )
+        )
+        assert len(items) >= 6, f"Expected >= 6 evidence items, got {len(items)}"
+        accepted = [e for e in items if e.get("accepted", True)]
+        assert len(accepted) >= 3, f"Expected >= 3 accepted evidence, got {len(accepted)}"
+        source_ids = {e["source_id"] for e in items}
+        assert len(source_ids) >= 2, f"Expected evidence from >= 2 sources, got {source_ids}"
 
 def test_citation_audit_validation():
     engine = EvidenceEngine(llm_client=None)

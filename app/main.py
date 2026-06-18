@@ -1421,6 +1421,49 @@ async def research_run(
     out = await _create_profile_task(body, task_type="research")
     return JSONResponse(content=out)
 
+
+@app.post("/v1/research/deep")
+async def research_deep(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    """Run deep research with autonomous iteration loop."""
+    _validate_api_key(authorization)
+    body = await request.json()
+    question = body.get("question", "")
+    urls = body.get("urls", [])
+    docs = body.get("docs", False)
+    mode = body.get("mode", "live")
+    max_iterations = body.get("max_iterations", 3)
+    min_sources = body.get("min_sources", 3)
+    min_evidence = body.get("min_evidence", 5)
+    min_confidence = body.get("min_confidence", 75)
+
+    if not question:
+        return JSONResponse(status_code=400, content={"error": "question is required"})
+
+    from app.research_loop import ResearchLoop, ResearchLoopConfig
+
+    config = ResearchLoopConfig(
+        max_iterations=int(max_iterations),
+        min_sources=int(min_sources),
+        min_evidence=int(min_evidence),
+        min_confidence=int(min_confidence),
+    )
+    loop = ResearchLoop(config)
+    try:
+        result = await loop.run(
+            question=question,
+            urls=urls,
+            mode=mode,
+            db=db,
+            workflow_engine=workflow_engine,
+            docs=docs,
+        )
+        return JSONResponse(content=result)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 @app.post("/v1/repo_audit/run")
 async def repo_audit_run(
     request: Request,
@@ -2284,9 +2327,45 @@ async def replay_workflow_run(run_id: str, authorization: Optional[str] = Header
     }
 
 
+@app.get("/v1/workflows/{run_id}/loop")
+async def get_research_loop(run_id: str, authorization: Optional[str] = Header(default=None)):
+    """Return research loop state for a run."""
+    _validate_api_key(authorization)
+    from app.research_loop import ResearchLoop
+    state = ResearchLoop.read_loop_state(run_id)
+    if not state:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"No research loop state found for run '{run_id}'")
+    return state
+
+
+@app.get("/v1/workflows/{run_id}/claims")
+async def get_claim_graph(run_id: str, authorization: Optional[str] = Header(default=None)):
+    """Return claim graph for a workflow run."""
+    _validate_api_key(authorization)
+    from app.claim_graph import read_claim_graph, claim_metrics
+    graph = read_claim_graph(run_id)
+    if not graph.get("claims"):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"No claim graph found for run '{run_id}'")
+    return {
+        "run_id": run_id,
+        "graph": graph,
+        "metrics": claim_metrics(graph),
+    }
+
+
 # =============================================================================
 # v0.6.3 — Research Benchmark Endpoints
 # =============================================================================
+
+@app.get("/v1/providers")
+async def list_providers(authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    from app.benchmark_engine import BenchmarkEngine
+    providers = BenchmarkEngine.get_available_providers()
+    return {"providers": providers}
+
 
 @app.get("/v1/benchmarks")
 async def list_benchmarks(authorization: Optional[str] = Header(default=None)):
@@ -2301,6 +2380,7 @@ async def run_benchmark(request: Request, authorization: Optional[str] = Header(
     _validate_api_key(authorization)
     body = await request.json()
     case_name = body.get("case_name")
+    provider = body.get("provider")  # optional provider override
     from app.benchmark_engine import BenchmarkEngine
 
     if case_name:
@@ -2309,7 +2389,7 @@ async def run_benchmark(request: Request, authorization: Optional[str] = Header(
         except Exception as e:
             return JSONResponse(status_code=400, content={"error": f"Cannot load case '{case_name}': {e}"})
         run_id = str(uuid.uuid4())[:8]
-        return await _run_benchmark_case_async(run_id, case, case_name)
+        return await _run_benchmark_case_async(run_id, case, case_name, provider=provider)
     else:
         # Run all cases
         try:
@@ -2321,23 +2401,51 @@ async def run_benchmark(request: Request, authorization: Optional[str] = Header(
             try:
                 case = BenchmarkEngine.load_case(cn)
                 run_id = str(uuid.uuid4())[:8]
-                result = await _run_benchmark_case_async(run_id, case, cn)
+                result = await _run_benchmark_case_async(run_id, case, cn, provider=provider)
                 results.append(result)
             except Exception as e:
                 results.append({"case_name": cn, "error": str(e)})
         return {"results": results}
 
 
-async def _run_benchmark_case_async(run_id: str, case: dict, case_name: str) -> dict:
+async def _run_benchmark_case_async(run_id: str, case: dict, case_name: str, provider: Optional[str] = None) -> dict:
     """Run a single benchmark case with proper async handling."""
     import json
     import shutil
+    import time as time_mod
     from pathlib import Path
-    from app.benchmark_engine import BenchmarkEngine, BENCHMARK_RUNS_DIR, WORKFLOW_RUNS_DIR
+    from app.benchmark_engine import BenchmarkEngine, BENCHMARK_RUNS_DIR, WORKFLOW_RUNS_DIR, PROVIDER_REGISTRY
 
     question = case["question"]
     sources = case["sources"]
     expected = case.get("expected", {})
+
+    # Resolve provider info
+    resolved_provider = None
+    resolved_model = None
+    if provider:
+        provider_info = PROVIDER_REGISTRY.get(provider)
+        if provider_info and provider_info.get("available", True):
+            resolved_provider = provider
+            resolved_model = provider_info.get("model")
+        elif provider_info:
+            # Provider is registered but not available — skip
+            return {
+                "run_id": run_id,
+                "case_name": case_name,
+                "status": "skipped",
+                "provider": provider,
+                "reason": provider_info.get("reason", f"Provider '{provider}' is not available"),
+            }
+        else:
+            return {
+                "run_id": run_id,
+                "case_name": case_name,
+                "status": "skipped",
+                "provider": provider,
+                "reason": f"Unknown provider '{provider}'",
+            }
+
     urls = [f"file://{s['path']}" for s in sources]
 
     # Create a task run using the workflow engine
@@ -2366,8 +2474,14 @@ async def _run_benchmark_case_async(run_id: str, case: dict, case_name: str) -> 
         "artifacts_json": art,
     })
 
+    # Set provider env var if specified
+    original_provider = os.environ.get("STARAGENT_LLM_PROVIDER")
+    if resolved_provider:
+        os.environ["STARAGENT_LLM_PROVIDER"] = resolved_provider
+
     # Execute workflow with auto-approve loop
     wf_result = None
+    t0 = time_mod.time()
     try:
         wf_result = await workflow_engine.execute_workflow(task_id)
         # Auto-approve and resume if paused
@@ -2393,6 +2507,15 @@ async def _run_benchmark_case_async(run_id: str, case: dict, case_name: str) -> 
             break
     except Exception as wf_err:
         wf_result = {"error": str(wf_err), "status": "failed"}
+    finally:
+        # Restore original provider env var
+        if resolved_provider:
+            if original_provider is not None:
+                os.environ["STARAGENT_LLM_PROVIDER"] = original_provider
+            else:
+                os.environ.pop("STARAGENT_LLM_PROVIDER", None)
+
+    runtime_seconds = round(time_mod.time() - t0, 1)
 
     # Copy output files to .runtime/benchmarks/<run_id>/
     wf_dir = WORKFLOW_RUNS_DIR / run_id
@@ -2419,6 +2542,9 @@ async def _run_benchmark_case_async(run_id: str, case: dict, case_name: str) -> 
     result_data = {
         "run_id": run_id,
         "case_name": case_name,
+        "provider": resolved_provider,
+        "model": resolved_model,
+        "runtime_seconds": runtime_seconds,
         "question": question,
         "source_count": len(sources),
         "expected": expected,
@@ -2435,6 +2561,32 @@ async def _run_benchmark_case_async(run_id: str, case: dict, case_name: str) -> 
         scores = BenchmarkEngine.score_run(run_id)
     except Exception as score_err:
         scores = {"error": str(score_err)}
+
+    # Enrich with research loop and claim graph metadata if present
+    from app.research_loop import ResearchLoop
+    loop_state = ResearchLoop.read_loop_state(run_id)
+    if loop_state:
+        # Update benchmark_result.json with loop metadata
+        try:
+            result_file = bench_dir / "benchmark_result.json"
+            if result_file.is_file():
+                existing = json.loads(result_file.read_text(encoding="utf-8"))
+                existing["iteration_count"] = len(loop_state.get("iterations", []))
+                existing["final_confidence"] = loop_state.get("final_confidence")
+                existing["stop_reason"] = loop_state.get("final_decision")
+                # Enrich with claim metrics
+                from app.claim_graph import read_claim_graph, claim_metrics
+                cg = read_claim_graph(run_id)
+                if cg.get("claims"):
+                    metrics = claim_metrics(cg)
+                    existing["supported_claim_count"] = metrics["supported_count"]
+                    existing["contradicted_claim_count"] = metrics["contradicted_count"]
+                    existing["unsupported_claim_count"] = metrics["unsupported_count"]
+                    existing["claim_confidence_avg"] = metrics["claim_confidence_avg"]
+                result_file.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+                result_data = existing
+        except Exception:
+            pass
 
     return {"run_id": run_id, "case_name": case_name, "scores": scores}
 
@@ -2471,3 +2623,24 @@ async def compare_benchmarks(request: Request, authorization: Optional[str] = He
     from app.benchmark_engine import BenchmarkEngine
     comparison = BenchmarkEngine.compare_runs(run_id_a, run_id_b)
     return comparison
+
+
+@app.post("/v1/benchmarks/compare-providers")
+async def compare_benchmark_providers(request: Request, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    body = await request.json()
+    case_name = body.get("case_name")
+    if not case_name:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="case_name required")
+    from app.benchmark_engine import BenchmarkEngine
+    result = BenchmarkEngine.compare_providers(case_name)
+    return result
+
+
+@app.get("/v1/benchmarks/leaderboard")
+async def benchmark_leaderboard(authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    from app.benchmark_engine import BenchmarkEngine
+    board = BenchmarkEngine.leaderboard()
+    return {"leaderboard": board}

@@ -169,10 +169,10 @@ class TestEvidenceEngineNoFabrication:
         )
         assert "No claims or findings extracted" in outline
 
-    def test_rule_based_extract_no_keywords(self):
-        """Rule-based extraction with no matching keywords returns empty."""
+    def test_rule_based_extract_short_text(self):
+        """Rule-based extraction skips text shorter than 20 chars."""
         engine = EvidenceEngine(llm_client=None)
-        items = engine._rule_based_extract("This is some random text.", "zzzzzunrelated")
+        items = engine._rule_based_extract("Short text.", "zzzzzunrelated")
         assert len(items) == 0
 
     def test_rule_based_extract_with_match(self):

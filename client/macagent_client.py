@@ -5,7 +5,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -1122,6 +1122,44 @@ class MacAgentClient:
         r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/replay", headers=headers)
         return r.json()
 
+    def workflow_run_loop(self, run_id: str) -> Dict[str, Any]:
+        """Get research loop state for a workflow run."""
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/loop", headers=headers)
+        return r.json()
+
+    def workflow_run_claims(self, run_id: str) -> Dict[str, Any]:
+        """Get claim graph for a workflow run."""
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/claims", headers=headers)
+        return r.json()
+
+    def research_deep(
+        self,
+        question: str,
+        mode: str = "live",
+        urls: Optional[List[str]] = None,
+        docs: bool = False,
+        max_iterations: int = 3,
+        min_sources: int = 3,
+        min_evidence: int = 5,
+        min_confidence: int = 75,
+    ) -> Dict[str, Any]:
+        """Run deep research with autonomous iteration loop."""
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        body = {
+            "question": question,
+            "mode": mode,
+            "urls": urls or [],
+            "docs": docs,
+            "max_iterations": max_iterations,
+            "min_sources": min_sources,
+            "min_evidence": min_evidence,
+            "min_confidence": min_confidence,
+        }
+        r = self._http.post(f"{self.v1_base_url}/research/deep", json=body, headers=headers)
+        return r.json()
+
     # =========================================================================
     # Benchmark Suite
     # =========================================================================
@@ -1132,10 +1170,13 @@ class MacAgentClient:
         r = self._http.get(f"{self.v1_base_url}/benchmarks", headers=headers)
         return r.json()
 
-    def benchmark_run(self, case_name: Optional[str] = None) -> Dict[str, Any]:
+    def benchmark_run(self, case_name: Optional[str] = None, provider: Optional[str] = None) -> Dict[str, Any]:
         """Run a benchmark case (or all cases if None)."""
         headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
-        r = self._http.post(f"{self.v1_base_url}/benchmarks/run", json={"case_name": case_name}, headers=headers)
+        body = {"case_name": case_name}
+        if provider:
+            body["provider"] = provider
+        r = self._http.post(f"{self.v1_base_url}/benchmarks/run", json=body, headers=headers)
         return r.json()
 
     def benchmark_score(self, run_id: str) -> Dict[str, Any]:
@@ -1154,4 +1195,22 @@ class MacAgentClient:
         """Compare two benchmark runs and detect regression."""
         headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
         r = self._http.post(f"{self.v1_base_url}/benchmarks/compare", json={"run_id_a": run_id_a, "run_id_b": run_id_b}, headers=headers)
+        return r.json()
+
+    def benchmark_providers(self) -> Dict[str, Any]:
+        """List available providers."""
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/providers", headers=headers)
+        return r.json()
+
+    def benchmark_compare_providers(self, case_name: str) -> Dict[str, Any]:
+        """Compare providers for a benchmark case."""
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"}
+        r = self._http.post(f"{self.v1_base_url}/benchmarks/compare-providers", json={"case_name": case_name}, headers=headers)
+        return r.json()
+
+    def benchmark_leaderboard(self) -> Dict[str, Any]:
+        """Get benchmark leaderboard."""
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/benchmarks/leaderboard", headers=headers)
         return r.json()

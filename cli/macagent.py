@@ -234,7 +234,8 @@ def _dispatch_benchmark(args, client, ctx) -> int:
             return 0
 
         if args.benchmark_cmd == "run":
-            r = client.benchmark_run(args.case_name)
+            provider = getattr(args, "provider", None)
+            r = client.benchmark_run(args.case_name, provider=provider)
             print(_json.dumps(r, indent=2) if args.as_json else f"Started benchmark run: {r.get('run_id', 'unknown')}")
             return 0
 
@@ -279,6 +280,59 @@ def _dispatch_benchmark(args, client, ctx) -> int:
                     print("\n⚠️  REGRESSION DETECTED:")
                     for detail in r.get("regression_details", []):
                         print(f"  - {detail}")
+            return 0
+
+        if args.benchmark_cmd == "providers":
+            r = client.benchmark_providers()
+            providers = r.get("providers", r) if isinstance(r, dict) else r
+            if args.as_json:
+                print(_json.dumps(r, indent=2))
+            else:
+                print("Available providers:")
+                for p in providers:
+                    name = p.get("name", "?")
+                    avail = "✓" if p.get("available") else "✗"
+                    model = p.get("model") or "-"
+                    reason = p.get("reason", "")
+                    extra = f" ({reason})" if reason else ""
+                    print(f"  {avail} {name:<12} model={model}{extra}")
+            return 0
+
+        if args.benchmark_cmd == "compare-providers":
+            r = client.benchmark_compare_providers(args.case_name)
+            if args.as_json:
+                print(_json.dumps(r, indent=2))
+            else:
+                results = r.get("results", [])
+                if not results:
+                    print(f"No provider comparison data for case '{args.case_name}'.")
+                else:
+                    print(f"Provider comparison for case '{args.case_name}':")
+                    print(f"{'Rank':<6} {'Provider':<12} {'Model':<30} {'Score':<8} {'Runtime':<10}")
+                    print("-" * 66)
+                    for row in results:
+                        sc = row.get("score", {})
+                        overall = sc.get("overall_score", "-")
+                        rt = row.get("runtime_seconds", "-")
+                        print(f"{row.get('rank', '-'):<6} {row.get('provider', ''):<12} {str(row.get('model', '')):<30} {str(overall):<8} {str(rt):<10}")
+            return 0
+
+        if args.benchmark_cmd == "leaderboard":
+            r = client.benchmark_leaderboard()
+            board = r.get("leaderboard", r) if isinstance(r, dict) else r
+            if args.as_json:
+                print(_json.dumps(r, indent=2))
+            else:
+                if not board:
+                    print("No benchmark runs found for leaderboard.")
+                else:
+                    print("Benchmark Leaderboard:")
+                    print(f"{'Rank':<6} {'Case':<25} {'Provider':<12} {'Score':<8}")
+                    print("-" * 51)
+                    for entry in board:
+                        sc = entry.get("score", {})
+                        overall = sc.get("overall_score", "-")
+                        print(f"{entry.get('rank', '-'):<6} {entry.get('case_name', ''):<25} {str(entry.get('provider', '') or '-'):<12} {str(overall):<8}")
             return 0
     except Exception as e:
         print(f"Benchmark error: {e}", file=sys.stderr)
@@ -596,12 +650,17 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark_sub.add_parser("list", help="List available benchmark cases")
     bm_run = benchmark_sub.add_parser("run", help="Run a benchmark case")
     bm_run.add_argument("case_name", nargs="?", default=None, help="Case name to run (default: all)")
+    bm_run.add_argument("--provider", default=None, help="Provider to use (groq, longcat, ollama, openai, anthropic, gemini)")
     bm_score = benchmark_sub.add_parser("score", help="Score a completed benchmark run")
     bm_score.add_argument("run_id", help="Run ID from benchmark run")
     benchmark_sub.add_parser("history", help="Show benchmark run history")
     bm_compare = benchmark_sub.add_parser("compare", help="Compare two benchmark runs")
     bm_compare.add_argument("run_id_a", help="First run ID")
     bm_compare.add_argument("run_id_b", help="Second run ID")
+    benchmark_sub.add_parser("providers", help="List available providers")
+    bm_cp = benchmark_sub.add_parser("compare-providers", help="Compare providers for a case")
+    bm_cp.add_argument("case_name", help="Benchmark case name")
+    benchmark_sub.add_parser("leaderboard", help="Show benchmark leaderboard")
 
     skills_cmd = sub.add_parser("skills", help="Skill library management")
     skills_sub = skills_cmd.add_subparsers(dest="skills_cmd", required=True)
@@ -790,6 +849,12 @@ def build_parser() -> argparse.ArgumentParser:
     replay_wf = workflow_sub.add_parser("replay", help="Replay a workflow run trace for diagnostics")
     replay_wf.add_argument("run_id", help="Workflow Run/Task ID")
 
+    loop_wf = workflow_sub.add_parser("loop", help="Show research loop state for a run")
+    loop_wf.add_argument("run_id", help="Workflow Run/Task ID")
+
+    claims_wf = workflow_sub.add_parser("claims", help="Show claim graph for a run")
+    claims_wf.add_argument("run_id", help="Workflow Run/Task ID")
+
     research = sub.add_parser("research", help="Document research mode (runs as a task)")
     research_sub = research.add_subparsers(dest="research_cmd", required=True)
 
@@ -810,6 +875,10 @@ def build_parser() -> argparse.ArgumentParser:
     research_deep.add_argument("--mode", default="live", choices=["live", "test"], help="Execution mode (default: live)")
     research_deep.add_argument("--url", action="append", dest="urls", help="Manual URL(s) to fetch")
     research_deep.add_argument("--docs", action="store_true", help="Enable local documentation search")
+    research_deep.add_argument("--max-iterations", type=int, default=3, help="Maximum research iterations (default: 3)")
+    research_deep.add_argument("--min-sources", type=int, default=3, help="Minimum sources required (default: 3)")
+    research_deep.add_argument("--min-evidence", type=int, default=5, help="Minimum evidence items required (default: 5)")
+    research_deep.add_argument("--min-confidence", type=int, default=75, help="Minimum confidence threshold 0-100 (default: 75)")
 
     docs = sub.add_parser("docs", help="Local documentation knowledge base")
     docs_sub = docs.add_subparsers(dest="docs_cmd", required=True)
@@ -2139,6 +2208,48 @@ def main(argv: Optional[list[str]] = None) -> int:
                     print(f"  [{ts}] [{stage}] {tool}{dur_s} -> {status}")
                 return 0
 
+            if args.workflow_cmd == "loop":
+                out = client.workflow_run_loop(args.run_id)
+                if getattr(args, "as_json", False):
+                    print(json.dumps(out, ensure_ascii=False, indent=2))
+                    return 0
+                iterations = out.get("iterations", [])
+                print(f"Research Loop for run '{out.get('run_id', args.run_id)}':")
+                print(f"  Final decision: {out.get('final_decision', '?')}")
+                print(f"  Final confidence: {out.get('final_confidence', '?')}/100")
+                print(f"  Total iterations: {len(iterations)}")
+                for it in iterations:
+                    gaps = ", ".join(it.get("gaps", []) or []) or "none"
+                    print(f"    Iteration {it.get('iteration', '?')}: "
+                          f"sources={it.get('sources_count', '?')}, "
+                          f"evidence={it.get('evidence_count', '?')}, "
+                          f"confidence={it.get('confidence', '?')}, "
+                          f"action={it.get('action', '?')}, "
+                          f"gaps=[{gaps}]")
+                return 0
+
+            if args.workflow_cmd == "claims":
+                out = client.workflow_run_claims(args.run_id)
+                if getattr(args, "as_json", False):
+                    print(json.dumps(out, ensure_ascii=False, indent=2))
+                    return 0
+                graph = out.get("graph", {})
+                metrics = out.get("metrics", {})
+                claims = graph.get("claims", [])
+                print(f"Claim Graph for run '{args.run_id}':")
+                print(f"  Total claims: {metrics.get('total_claims', 0)}")
+                print(f"  Supported: {metrics.get('supported_count', 0)}")
+                print(f"  Weak: {metrics.get('weak_count', 0)}")
+                print(f"  Contradicted: {metrics.get('contradicted_count', 0)}")
+                print(f"  Unsupported: {metrics.get('unsupported_count', 0)}")
+                print(f"  Avg confidence: {metrics.get('claim_confidence_avg', 0)}")
+                for c in claims[:20]:
+                    print(f"    {c.get('claim_id')}: {c.get('text')[:100]} "
+                          f"[{c.get('status')}] conf={c.get('confidence')}")
+                if len(claims) > 20:
+                    print(f"    ... and {len(claims) - 20} more claims")
+                return 0
+
         if args.cmd == "research":
             if args.research_cmd == "run":
                 out = client.research_run(
@@ -2168,26 +2279,30 @@ def main(argv: Optional[list[str]] = None) -> int:
                 urls = getattr(args, "urls", []) or []
                 docs = getattr(args, "docs", False)
                 mode = getattr(args, "mode", "live")
-                out = client.workflow_run(
-                    name="deep_research",
-                    project_id=ctx["project_id"],
-                    conversation_id=ctx["conversation_id"],
-                    goal=args.question,
-                    definition_of_done="Deep research report generated and verified.",
+                max_iterations = getattr(args, "max_iterations", 3)
+                min_sources = getattr(args, "min_sources", 3)
+                min_evidence = getattr(args, "min_evidence", 5)
+                min_confidence = getattr(args, "min_confidence", 75)
+                out = client.research_deep(
+                    question=args.question,
                     mode=mode,
                     urls=urls,
-                    docs=docs
+                    docs=docs,
+                    max_iterations=max_iterations,
+                    min_sources=min_sources,
+                    min_evidence=min_evidence,
+                    min_confidence=min_confidence,
                 )
-                task_id = out.get("task_id")
-                if task_id:
-                    _remember_last_task(task_id)
+                run_id = out.get("run_id", "")
+                if run_id:
+                    _remember_last_task(run_id)
                 if getattr(args, "as_json", False):
                     print(json.dumps(out, ensure_ascii=False, indent=2))
                     return 0
-                print(f"Started deep research workflow run: {task_id}")
-                task_data = out.get("task") or {}
-                print(f"Status: {task_data.get('status')}")
-                print(f"Summary: {task_data.get('final_summary') or 'Execution started.'}")
+                print(f"Deep research complete: {run_id}")
+                print(f"Iterations: {out.get('iteration_count', '?')}")
+                print(f"Final confidence: {out.get('final_confidence', '?')}/100")
+                print(f"Stop reason: {out.get('stop_reason', '?')}")
                 return 0
 
             raise SystemExit(f"unknown research command: {args.research_cmd}")

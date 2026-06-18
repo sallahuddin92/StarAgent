@@ -460,3 +460,292 @@ class TestBenchmarkErrorMessages:
         finally:
             bm.BENCHMARK_RUNS_DIR = original_bench
             bm.WORKFLOW_RUNS_DIR = original_wf
+
+
+# ── Provider Discovery Tests ────────────────────────────────────────
+
+class TestProviderDiscovery:
+    """Provider discovery and registry tests."""
+
+    def test_provider_registry_exists(self):
+        from app.benchmark_engine import PROVIDER_REGISTRY
+        assert "groq" in PROVIDER_REGISTRY
+        assert "longcat" in PROVIDER_REGISTRY
+        assert "ollama" in PROVIDER_REGISTRY
+        assert "openai" in PROVIDER_REGISTRY
+        assert "anthropic" in PROVIDER_REGISTRY
+        assert "gemini" in PROVIDER_REGISTRY
+
+    def test_detect_available_providers(self, monkeypatch):
+        """Should report groq as available when key is set."""
+        monkeypatch.setenv("GROQ_API_KEY", "sk-test")
+        providers = BenchmarkEngine.get_available_providers()
+        groq = next((p for p in providers if p["name"] == "groq"), None)
+        assert groq is not None
+        assert groq["available"] is True
+
+    def test_detect_missing_key_provider(self, monkeypatch):
+        """Should report provider unavailable when env key missing."""
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        providers = BenchmarkEngine.get_available_providers()
+        groq = next((p for p in providers if p["name"] == "groq"), None)
+        assert groq is not None
+        assert groq["available"] is False
+        assert "Missing" in groq.get("reason", "")
+
+    def test_detect_providers_returns_dict(self, monkeypatch):
+        monkeypatch.setenv("GROQ_API_KEY", "sk-test")
+        result = BenchmarkEngine.detect_providers()
+        assert isinstance(result, dict)
+        assert "groq" in result
+        assert result["groq"]["available"] is True
+
+
+# ── Provider Metadata Tests ─────────────────────────────────────────
+
+class TestProviderMetadata:
+    """Provider metadata in score.json."""
+
+    def test_provider_metadata_in_score(self, tmp_path):
+        """score.json should include provider/model fields."""
+        import app.benchmark_engine as bm
+        original = bm.BENCHMARK_RUNS_DIR
+        bench_dir = tmp_path / ".runtime" / "benchmarks" / "prov_test"
+        bench_dir.mkdir(parents=True)
+        bm.BENCHMARK_RUNS_DIR = tmp_path / ".runtime" / "benchmarks"
+
+        report = "# Test\n## Summary\n## Key Findings\n## Evidence Table\n## Limitations\n## Citations\n## Source List\n"
+        (bench_dir / "generated_report.md").write_text(report, encoding="utf-8")
+        evidence = [{"evidence_id": "E1", "source_id": "S1", "quote": "q", "assertion": "a", "accepted": True}]
+        (bench_dir / "evidence_items.json").write_text(json.dumps(evidence), encoding="utf-8")
+        sources = [{"source_id": "S1", "title": "Test", "url": "file:///test"}]
+        (bench_dir / "sources.json").write_text(json.dumps(sources), encoding="utf-8")
+
+        result_data = {
+            "run_id": "prov_test",
+            "case_name": "test_case",
+            "provider": "groq",
+            "model": "llama-3.1-8b-instant",
+            "runtime_seconds": 42.5,
+            "question": "test",
+            "source_count": 1,
+            "expected": {
+                "required_claims": ["test claim"],
+                "forbidden_claims": [],
+                "required_citations": True,
+                "min_sources": 1,
+                "min_evidence": 1,
+                "required_sections": ["Summary", "Key Findings"],
+            },
+            "workflow_result": {},
+            "timestamp": 0,
+        }
+        (bench_dir / "benchmark_result.json").write_text(json.dumps(result_data), encoding="utf-8")
+
+        try:
+            scores = bm.BenchmarkEngine.score_run("prov_test")
+            score_data = json.loads((bench_dir / "score.json").read_text())
+            assert score_data["provider"] == "groq"
+            assert score_data["model"] == "llama-3.1-8b-instant"
+            assert score_data["runtime_seconds"] == 42.5
+        finally:
+            bm.BENCHMARK_RUNS_DIR = original
+
+    def test_score_run_missing_provider_ok(self, tmp_path):
+        """score.json should handle missing provider gracefully."""
+        import app.benchmark_engine as bm
+        original = bm.BENCHMARK_RUNS_DIR
+        bench_dir = tmp_path / ".runtime" / "benchmarks" / "no_prov"
+        bench_dir.mkdir(parents=True)
+        bm.BENCHMARK_RUNS_DIR = tmp_path / ".runtime" / "benchmarks"
+
+        report = "# Test\n## Summary\n## Key Findings\n## Evidence Table\n## Limitations\n## Citations\n## Source List\n"
+        (bench_dir / "generated_report.md").write_text(report, encoding="utf-8")
+        evidence = [{"evidence_id": "E1", "source_id": "S1", "quote": "q", "assertion": "a", "accepted": True}]
+        (bench_dir / "evidence_items.json").write_text(json.dumps(evidence), encoding="utf-8")
+        sources = [{"source_id": "S1", "title": "Test", "url": "file:///test"}]
+        (bench_dir / "sources.json").write_text(json.dumps(sources), encoding="utf-8")
+        result_data = {
+            "run_id": "no_prov",
+            "case_name": "test_case",
+            "question": "test",
+            "source_count": 1,
+            "expected": {
+                "required_claims": ["test claim"],
+                "forbidden_claims": [],
+                "required_citations": True,
+                "min_sources": 1,
+                "min_evidence": 1,
+                "required_sections": ["Summary", "Key Findings"],
+            },
+            "workflow_result": {},
+            "timestamp": 0,
+        }
+        (bench_dir / "benchmark_result.json").write_text(json.dumps(result_data), encoding="utf-8")
+
+        try:
+            scores = bm.BenchmarkEngine.score_run("no_prov")
+            score_data = json.loads((bench_dir / "score.json").read_text())
+            assert score_data.get("provider") is None
+            assert score_data.get("model") is None
+        finally:
+            bm.BENCHMARK_RUNS_DIR = original
+
+
+# ── Compare Providers & Leaderboard Tests ──────────────────────────
+
+class TestProviderComparison:
+    """compare_providers and leaderboard tests."""
+
+    def _setup_run(self, bench_dir: Path, run_id: str, case_name: str, provider: str,
+                   overall_score: float, timestamp: float):
+        """Helper to create a fake benchmark run with a score file."""
+        run_dir = bench_dir / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        score_data = {
+            "run_id": run_id,
+            "case_name": case_name,
+            "provider": provider,
+            "model": f"{provider}-model",
+            "runtime_seconds": 30.0,
+            "llm_call_count": 10,
+            "estimated_cost": 0.01,
+            "timestamp": timestamp,
+            "scores": {
+                "overall_score": overall_score,
+                "citation_accuracy": 90.0,
+                "evidence_coverage": 85.0,
+            },
+            "weights": {},
+            "regression_threshold": 5.0,
+        }
+        (run_dir / "score.json").write_text(json.dumps(score_data), encoding="utf-8")
+
+    def test_compare_providers_ranks_by_score(self, tmp_path):
+        """compare_providers should return results sorted by overall_score desc."""
+        import app.benchmark_engine as bm
+        original = bm.BENCHMARK_RUNS_DIR
+        bench_dir = tmp_path / ".runtime" / "benchmarks"
+        bench_dir.mkdir(parents=True)
+        bm.BENCHMARK_RUNS_DIR = bench_dir
+
+        self._setup_run(bench_dir, "run1", "test_case", "groq", 80.0, 100)
+        self._setup_run(bench_dir, "run2", "test_case", "openai", 90.0, 200)
+
+        try:
+            result = bm.BenchmarkEngine.compare_providers("test_case")
+            assert result["count"] == 2
+            assert result["results"][0]["provider"] == "openai"
+            assert result["results"][0]["rank"] == 1
+            assert result["results"][1]["provider"] == "groq"
+            assert result["results"][1]["rank"] == 2
+            assert result["results"][0]["score"]["overall_score"] == 90.0
+            assert result["results"][1]["score"]["overall_score"] == 80.0
+        finally:
+            bm.BENCHMARK_RUNS_DIR = original
+
+    def test_compare_providers_picks_best_per_provider(self, tmp_path):
+        """When a provider has multiple runs, the best one is used."""
+        import app.benchmark_engine as bm
+        original = bm.BENCHMARK_RUNS_DIR
+        bench_dir = tmp_path / ".runtime" / "benchmarks"
+        bench_dir.mkdir(parents=True)
+        bm.BENCHMARK_RUNS_DIR = bench_dir
+
+        self._setup_run(bench_dir, "run1", "test_case", "groq", 70.0, 100)
+        self._setup_run(bench_dir, "run2", "test_case", "groq", 95.0, 200)
+        self._setup_run(bench_dir, "run3", "test_case", "openai", 85.0, 150)
+
+        try:
+            result = bm.BenchmarkEngine.compare_providers("test_case")
+            assert result["count"] == 2
+            groq_entry = next(r for r in result["results"] if r["provider"] == "groq")
+            assert groq_entry["score"]["overall_score"] == 95.0
+        finally:
+            bm.BENCHMARK_RUNS_DIR = original
+
+    def test_compare_providers_empty_case(self, tmp_path):
+        """compare_providers on a non-existent case returns empty."""
+        import app.benchmark_engine as bm
+        original = bm.BENCHMARK_RUNS_DIR
+        bench_dir = tmp_path / ".runtime" / "benchmarks"
+        bench_dir.mkdir(parents=True)
+        bm.BENCHMARK_RUNS_DIR = bench_dir
+
+        try:
+            result = bm.BenchmarkEngine.compare_providers("nonexistent")
+            assert result["count"] == 0
+            assert result["results"] == []
+        finally:
+            bm.BENCHMARK_RUNS_DIR = original
+
+    def test_leaderboard_works(self, tmp_path):
+        """leaderboard should return sorted entries by best score per case."""
+        import app.benchmark_engine as bm
+        original = bm.BENCHMARK_RUNS_DIR
+        bench_dir = tmp_path / ".runtime" / "benchmarks"
+        bench_dir.mkdir(parents=True)
+        bm.BENCHMARK_RUNS_DIR = bench_dir
+
+        self._setup_run(bench_dir, "r1", "case_a", "groq", 90.0, 100)
+        self._setup_run(bench_dir, "r2", "case_b", "openai", 80.0, 200)
+
+        try:
+            board = bm.BenchmarkEngine.leaderboard()
+            assert len(board) == 2
+            assert board[0]["case_name"] == "case_a"
+            assert board[0]["rank"] == 1
+            assert board[1]["case_name"] == "case_b"
+            assert board[1]["rank"] == 2
+        finally:
+            bm.BENCHMARK_RUNS_DIR = original
+
+    def test_leaderboard_picks_best_score_per_case(self, tmp_path):
+        """When a case has multiple runs, leaderboard keeps the best."""
+        import app.benchmark_engine as bm
+        original = bm.BENCHMARK_RUNS_DIR
+        bench_dir = tmp_path / ".runtime" / "benchmarks"
+        bench_dir.mkdir(parents=True)
+        bm.BENCHMARK_RUNS_DIR = bench_dir
+
+        self._setup_run(bench_dir, "r1", "case_a", "groq", 70.0, 100)
+        self._setup_run(bench_dir, "r2", "case_a", "openai", 95.0, 200)
+
+        try:
+            board = bm.BenchmarkEngine.leaderboard()
+            assert len(board) == 1
+            assert board[0]["score"]["overall_score"] == 95.0
+        finally:
+            bm.BENCHMARK_RUNS_DIR = original
+
+    def test_leaderboard_empty(self, tmp_path):
+        """leaderboard with no runs returns empty list."""
+        import app.benchmark_engine as bm
+        original = bm.BENCHMARK_RUNS_DIR
+        bench_dir = tmp_path / ".runtime" / "benchmarks"
+        bench_dir.mkdir(parents=True)
+        bm.BENCHMARK_RUNS_DIR = bench_dir
+
+        try:
+            board = bm.BenchmarkEngine.leaderboard()
+            assert board == []
+        finally:
+            bm.BENCHMARK_RUNS_DIR = original
+
+    def test_history_includes_provider(self, tmp_path):
+        """history() should include provider and model fields."""
+        import app.benchmark_engine as bm
+        original = bm.BENCHMARK_RUNS_DIR
+        bench_dir = tmp_path / ".runtime" / "benchmarks"
+        bench_dir.mkdir(parents=True)
+        bm.BENCHMARK_RUNS_DIR = bench_dir
+
+        self._setup_run(bench_dir, "r1", "case_a", "groq", 85.0, 100)
+
+        try:
+            runs = bm.BenchmarkEngine.history()
+            assert len(runs) == 1
+            assert runs[0]["provider"] == "groq"
+            assert runs[0]["model"] == "groq-model"
+        finally:
+            bm.BENCHMARK_RUNS_DIR = original

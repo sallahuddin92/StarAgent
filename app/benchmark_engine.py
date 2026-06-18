@@ -32,6 +32,15 @@ SCORE_WEIGHTS = {
 
 REGRESSION_THRESHOLD = 5.0
 
+PROVIDER_REGISTRY = {
+    "groq":     {"env_key": "GROQ_API_KEY",         "model": "llama-3.1-8b-instant",           "available": False},
+    "longcat":  {"env_key": "LONGCAT_API_KEY",       "model": "LongCat-Flash-Thinking-2601",   "available": False, "extra_env": "LONGCAT_MODEL"},
+    "ollama":   {"env_key": None,                    "model": None,                             "available": False},
+    "openai":   {"env_key": "OPENAI_API_KEY",        "model": "gpt-4o",                         "available": False},
+    "anthropic":{"env_key": "ANTHROPIC_API_KEY",      "model": "claude-3-5-sonnet-20240620",   "available": False},
+    "gemini":   {"env_key": "GEMINI_API_KEY",         "model": "gemini-1.5-pro",                "available": False},
+}
+
 REQUIRED_EXPECTED_KEYS = {
     "required_claims": list,
     "required_sections": list,
@@ -55,6 +64,35 @@ class BenchmarkEngine:
     @staticmethod
     def _benchmarks_root() -> Path:
         return BENCHMARKS_DIR
+
+    # ── Provider Discovery ─────────────────────────────────────────
+
+    @staticmethod
+    def get_available_providers() -> List[Dict[str, Any]]:
+        """Check which providers are available based on env keys and return metadata."""
+        available = []
+        for name, info in PROVIDER_REGISTRY.items():
+            entry = dict(info)
+            entry["name"] = name
+            if info.get("env_key") and not os.environ.get(info["env_key"]):
+                entry["available"] = False
+                entry["reason"] = f"Missing {info['env_key']} environment variable"
+                available.append(entry)
+                continue
+            if name == "ollama":
+                # Check if ollama is reachable
+                entry["available"] = bool(os.environ.get("OLLAMA_HOST")) or True  # default localhost
+                if not entry["available"]:
+                    entry["reason"] = "Ollama not detected"
+            else:
+                entry["available"] = True
+            available.append(entry)
+        return available
+
+    @staticmethod
+    def detect_providers() -> Dict[str, Dict[str, Any]]:
+        """Return full provider metadata keyed by name."""
+        return {p["name"]: p for p in BenchmarkEngine.get_available_providers()}
 
     # ── Case Discovery ──────────────────────────────────────────────
 
@@ -328,15 +366,32 @@ class BenchmarkEngine:
 
         scores = cls.score_report(report, evidence_items, sources, expected)
 
+        # Provider metadata from result if available
+        provider = result.get("provider")
+        model = result.get("model")
+        runtime_seconds = result.get("runtime_seconds")
+        llm_call_count = result.get("llm_call_count")
+        estimated_cost = result.get("estimated_cost")
+
         # Write score.json
         score_file = bench_dir / "score.json"
         score_data = {
             "run_id": run_id,
             "case_name": result.get("case_name", ""),
+            "provider": provider,
+            "model": model,
+            "runtime_seconds": runtime_seconds,
+            "llm_call_count": llm_call_count,
+            "estimated_cost": estimated_cost,
             "timestamp": time.time(),
             "scores": scores,
             "weights": SCORE_WEIGHTS,
             "regression_threshold": REGRESSION_THRESHOLD,
+            # v0.8.0 claim metrics
+            "supported_claim_count": result.get("supported_claim_count"),
+            "contradicted_claim_count": result.get("contradicted_claim_count"),
+            "unsupported_claim_count": result.get("unsupported_claim_count"),
+            "claim_confidence_avg": result.get("claim_confidence_avg"),
         }
         score_file.write_text(json.dumps(score_data, indent=2), encoding="utf-8")
 
@@ -406,7 +461,95 @@ class BenchmarkEngine:
                 runs.append({
                     "run_id": data.get("run_id", entry.name),
                     "case_name": data.get("case_name", ""),
+                    "provider": data.get("provider"),
+                    "model": data.get("model"),
                     "timestamp": data.get("timestamp", 0),
                     "overall_score": data.get("scores", {}).get("overall_score"),
                 })
         return sorted(runs, key=lambda r: r["timestamp"], reverse=True)
+
+    @classmethod
+    def leaderboard(cls) -> List[Dict[str, Any]]:
+        """Return ranked leaderboard: best overall_score per case_name."""
+        if not BENCHMARK_RUNS_DIR.is_dir():
+            return []
+        # Load all completed runs
+        runs = []
+        for entry in sorted(BENCHMARK_RUNS_DIR.iterdir()):
+            if not entry.is_dir():
+                continue
+            score_file = entry / "score.json"
+            if score_file.is_file():
+                data = json.loads(score_file.read_text(encoding="utf-8"))
+                scores = data.get("scores", {})
+                runs.append({
+                    "run_id": data.get("run_id", entry.name),
+                    "case_name": data.get("case_name", ""),
+                    "provider": data.get("provider"),
+                    "model": data.get("model"),
+                    "timestamp": data.get("timestamp", 0),
+                    "score": scores,
+                })
+
+        if not runs:
+            return []
+
+        # Group by case_name, keep best overall_score per case
+        best_per_case: Dict[str, Dict] = {}
+        for run in runs:
+            cn = run["case_name"]
+            prev = best_per_case.get(cn)
+            if prev is None or (run["score"].get("overall_score", 0) or 0) > (prev.get("score", {}).get("overall_score", 0) or 0):
+                best_per_case[cn] = run
+
+        ranked = sorted(best_per_case.values(), key=lambda r: r["score"].get("overall_score", 0) or 0, reverse=True)
+        for i, entry in enumerate(ranked, 1):
+            entry["rank"] = i
+        return ranked
+
+    @classmethod
+    def compare_providers(cls, case_name: str) -> Dict[str, Any]:
+        """Compare all provider runs for a given case. Returns ranked table."""
+        if not BENCHMARK_RUNS_DIR.is_dir():
+            return {"case_name": case_name, "results": [], "count": 0}
+
+        provider_runs: Dict[str, List[Dict]] = {}
+        for entry in sorted(BENCHMARK_RUNS_DIR.iterdir()):
+            if not entry.is_dir():
+                continue
+            score_file = entry / "score.json"
+            if not score_file.is_file():
+                continue
+            data = json.loads(score_file.read_text(encoding="utf-8"))
+            if data.get("case_name") != case_name:
+                continue
+            prov = data.get("provider") or "unknown"
+            if prov not in provider_runs:
+                provider_runs[prov] = []
+            scores = data.get("scores", {})
+            provider_runs[prov].append({
+                "run_id": data.get("run_id", entry.name),
+                "provider": prov,
+                "model": data.get("model"),
+                "runtime_seconds": data.get("runtime_seconds"),
+                "llm_call_count": data.get("llm_call_count"),
+                "estimated_cost": data.get("estimated_cost"),
+                "timestamp": data.get("timestamp", 0),
+                "score": scores,
+            })
+
+        # Pick best run per provider (by overall_score), then rank
+        results = []
+        for prov, runs in provider_runs.items():
+            best = max(runs, key=lambda r: r["score"].get("overall_score", 0) or 0)
+            results.append(best)
+
+        results.sort(key=lambda r: r["score"].get("overall_score", 0) or 0, reverse=True)
+        for i, r in enumerate(results, 1):
+            r["rank"] = i
+
+        return {
+            "case_name": case_name,
+            "results": results,
+            "count": len(results),
+        }
