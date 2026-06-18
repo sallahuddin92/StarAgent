@@ -181,6 +181,7 @@ task_engine = TaskEngine(
 
 from .stage_engine import StageEngine
 from .workflow_engine import WorkflowEngine
+from .statuses import COMPLETED
 stage_engine = StageEngine(llm=llm_client, executor=executor, db=db)
 workflow_engine = WorkflowEngine(db=db, stage_engine=stage_engine)
 
@@ -2082,3 +2083,202 @@ async def explain_workflow_endpoint(workflow_name: str, authorization: Optional[
     _validate_api_key(authorization)
     explanation = workflow_engine.explain_workflow(workflow_name)
     return {"explanation": explanation}
+
+
+# ── v0.6.1 Runtime Hardening ──────────────────────────────────────
+
+
+def _parse_age(older_than: str) -> int:
+    """Parse an age string like ``7d``, ``30d``, ``24h`` into seconds."""
+    older_than = (older_than or "7d").strip().lower()
+    if older_than.endswith("d"):
+        val = older_than[:-1]
+        return int(val) * 86400 if val.isdigit() else 7 * 86400
+    if older_than.endswith("h"):
+        val = older_than[:-1]
+        return int(val) * 3600 if val.isdigit() else 7 * 86400
+    if older_than.endswith("m"):
+        val = older_than[:-1]
+        return int(val) * 60 if val.isdigit() else 7 * 86400
+    if older_than.isdigit():
+        return int(older_than)
+    return 7 * 86400  # default 7 days
+
+
+@app.post("/v1/workflows/cleanup")
+async def cleanup_workflow_runs(request: Request, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    body = await request.json()
+    older_than = body.get("older_than", "7d")
+    dry_run = body.get("dry_run", False)
+    max_age_s = _parse_age(older_than)
+    now = time.time()
+
+    wf_root = Path(".runtime") / "workflows"
+    if not wf_root.exists():
+        return {"cleaned_count": 0, "dry_run": dry_run, "candidates": []}
+
+    cleaned = 0
+    candidates = []
+    for d in wf_root.iterdir():
+        if not d.is_dir():
+            continue
+        # Skip active run (has workflow_state.json with matching current process)
+        state_file = d / "workflow_state.json"
+        if state_file.exists():
+            try:
+                mtime = state_file.stat().st_mtime
+            except Exception:
+                mtime = 0
+        else:
+            try:
+                mtime = d.stat().st_mtime
+            except Exception:
+                mtime = 0
+        if mtime and (now - mtime) > max_age_s:
+            candidates.append(d.name)
+            if not dry_run:
+                import shutil
+                try:
+                    shutil.rmtree(str(d), ignore_errors=True)
+                    logger.info(f"Cleaned up stale workflow run: {d.name}")
+                    cleaned += 1
+                except Exception as e:
+                    logger.warning(f"Failed to clean up {d.name}: {e}")
+
+    result = {"cleaned_count": cleaned, "older_than": older_than, "dry_run": dry_run}
+    if dry_run:
+        result["candidates"] = candidates
+    return result
+
+
+@app.get("/v1/workflows/{run_id}/doctor")
+async def doctor_workflow_run(run_id: str, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    wf_dir = Path(".runtime") / "workflows" / run_id
+    if not wf_dir.exists():
+        return {
+            "status": "not_found",
+            "state_health": "missing",
+            "stages_count": 0,
+            "stages_completed": 0,
+            "anomalies": [f"Workflow run directory not found: {wf_dir}"],
+        }
+
+    anomalies: List[str] = []
+    state_health = "ok"
+    stages_completed = 0
+    stages_count = 0
+
+    # Check state file
+    state_file = wf_dir / "workflow_state.json"
+    if state_file.exists():
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            if not state.get("run_id"):
+                anomalies.append("workflow_state.json missing 'run_id' field")
+            if not state.get("workflow_name"):
+                anomalies.append("workflow_state.json missing 'workflow_name' field")
+        except Exception as e:
+            anomalies.append(f"workflow_state.json corrupt: {e}")
+            state_health = "corrupt"
+    else:
+        anomalies.append("workflow_state.json missing")
+        state_health = "incomplete"
+
+    # Check stage state
+    stage_file = wf_dir / "stage_state.json"
+    if stage_file.exists():
+        try:
+            s_list = json.loads(stage_file.read_text(encoding="utf-8"))
+            stages_count = len(s_list)
+            stages_completed = sum(1 for s in s_list if s.get("status") == COMPLETED)
+        except Exception as e:
+            anomalies.append(f"stage_state.json corrupt: {e}")
+    else:
+        anomalies.append("stage_state.json missing")
+
+    # Check for orphaned checkpoints
+    cp_dir = wf_dir / "checkpoints"
+    if cp_dir.exists():
+        orphaned = [f.name for f in sorted(cp_dir.iterdir()) if f.is_dir() and not (f / "stage_state.json").exists()]
+        if orphaned:
+            anomalies.append(f"orphaned checkpoint directories: {len(orphaned)}")
+
+    # Check trace dir — traces are written to global .runtime/traces/<run_id>.jsonl,
+    # so an empty local traces/ dir is expected when checkpoints/stages exist.
+    traces_dir = wf_dir / "traces"
+    cp_dir = wf_dir / "checkpoints"
+    has_checkpoints = cp_dir.exists() and any(cp_dir.iterdir())
+    if not traces_dir.exists() or not any(traces_dir.iterdir()):
+        if not has_checkpoints:
+            anomalies.append("traces directory missing or empty")
+
+    # Check final report output (deep research workflows)
+    report_file = wf_dir / "final_report.md"
+    if not report_file.exists():
+        # Only flag as anomaly if there are completed stages (work was started)
+        if stages_completed > 0:
+            anomalies.append("final_report.md missing (workflow may not have completed)")
+
+    return {
+        "status": "ok" if not anomalies else "degraded",
+        "state_health": state_health,
+        "stages_count": stages_count,
+        "stages_completed": stages_completed,
+        "anomalies": anomalies,
+    }
+
+
+@app.get("/v1/workflows/{run_id}/replay")
+async def replay_workflow_run(run_id: str, authorization: Optional[str] = Header(default=None)):
+    _validate_api_key(authorization)
+    wf_dir = Path(".runtime") / "workflows" / run_id
+    events: List[Dict[str, Any]] = []
+
+    # Collect tool events from JSONL
+    tool_events_file = wf_dir / "tool_events.jsonl"
+    if tool_events_file.exists():
+        try:
+            for line in tool_events_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    ev = json.loads(line)
+                    events.append(ev)
+        except Exception as e:
+            pass
+
+    # If no tool events, try traces directory
+    if not events:
+        traces_dir = wf_dir / "traces"
+        if traces_dir.exists():
+            for f in sorted(traces_dir.iterdir()):
+                if f.suffix in (".json", ".jsonl"):
+                    try:
+                        ev = json.loads(f.read_text(encoding="utf-8"))
+                        if isinstance(ev, list):
+                            events.extend(ev)
+                        else:
+                            events.append(ev)
+                    except Exception:
+                        pass
+
+    # Check stage_state for context and ordered stage list
+    stage_file = wf_dir / "stage_state.json"
+    total_stages = 0
+    stages = []
+    if stage_file.exists():
+        try:
+            s_list = json.loads(stage_file.read_text(encoding="utf-8"))
+            total_stages = len(s_list)
+            stages = s_list
+        except Exception:
+            pass
+
+    return {
+        "run_id": run_id,
+        "total_events": len(events),
+        "total_stages": total_stages,
+        "stages": stages,
+        "events": events[:500],  # cap to avoid oversized response
+    }

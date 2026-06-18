@@ -14,6 +14,7 @@ from .tool_runtime import verify_tool_permission
 from .skill_packs import build_pack_injection
 from .checkpoint import save_stage_checkpoint
 from .workflow_trace import WorkflowTraceLogger
+from .statuses import FAILED_WITH_REASON, COMPLETED_WITH_LIMITATIONS
 
 logger = logging.getLogger(__name__)
 
@@ -547,9 +548,10 @@ class StageEngine:
             evidence_items_file.write_text(json.dumps(evidence_items, indent=2), encoding="utf-8")
             files_produced.append(str(evidence_items_file))
             
-            table_lines = ["# Evidence Table\n", "| Source | Quote | Assertion | Citation |", "|---|---|---|---|"]
+            table_lines = ["# Evidence Table\n", "| Evidence ID | Source | Relevance Score | Quote | Assertion |", "|---|---|---|---|---|"]
             for e in evidence_items:
-                table_lines.append(f"| {e['source_id']} | {e['quote']} | {e['assertion']} | [{e['evidence_id']}] |")
+                score = e.get("relevance_score", "?")
+                table_lines.append(f"| [{e['evidence_id']}] | {e['source_id']} | {score} | {e['quote']} | {e['assertion']} |")
             
             evidence_table_file = wf_runtime_dir / "evidence_table.md"
             evidence_table_file.write_text("\n".join(table_lines), encoding="utf-8")
@@ -688,7 +690,23 @@ class StageEngine:
                     f"# Deep Research: {question}\n\n"
                     f"No configured live sources were available.\n"
                 )
-                variables["status"] = "completed_with_limitations"
+                variables["status"] = COMPLETED_WITH_LIMITATIONS
+            elif sources and all(s.get("error") for s in sources):
+                report = (
+                    f"# Deep Research: {question}\n\n"
+                    f"All configured sources failed to fetch.\n"
+                    f"No source content could be retrieved — every URL returned an error.\n"
+                )
+                variables["status"] = FAILED_WITH_REASON
+                variables["failed_reason"] = "All sources failed to fetch"
+            elif not evidence_items:
+                report = (
+                    f"# Deep Research: {question}\n\n"
+                    f"Sources were identified but no evidence could be extracted from them.\n"
+                    f"All fetched sources had empty or unreadable content.\n"
+                )
+                variables["status"] = COMPLETED_WITH_LIMITATIONS
+                variables["failed_reason"] = "No evidence extracted from sources"
             else:
                 outline = ""
                 prev_cp_dir = Path(".runtime") / "tasks" / task_id / "checkpoints" / "06_synthesize"

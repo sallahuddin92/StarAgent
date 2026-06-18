@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import subprocess
 import logging
 from typing import Dict, Any, List, Tuple, Optional
@@ -617,3 +618,41 @@ class GateEngine:
             return "fail", f"Found {count} direct quotes, which exceeds the limit of {max_quotes}."
         except Exception as e:
             return "fail", f"Failed to read final_report.md: {e}"
+
+    def _gate_unsupported_claims(self, args: Dict[str, Any], context: Dict[str, Any]) -> Tuple[str, str]:
+        """Check that the final report does not cite evidence IDs that don't exist
+        in the accepted evidence set. Detects uncited claims and fake citations."""
+        run_id = context.get("run_id") or ""
+        wf_root = self._get_workspace_path(f".runtime/workflows/{run_id}")
+        report_file = wf_root / "final_report.md"
+        evidence_file = wf_root / "evidence_items.json"
+
+        if not report_file.exists():
+            return "warning", "final_report.md not found — skipping unsupported claims check."
+
+        try:
+            report = report_file.read_text(encoding="utf-8")
+        except Exception as e:
+            return "fail", f"Cannot read final_report.md: {e}"
+
+        # Load accepted evidence IDs
+        accepted_ids: set = set()
+        if evidence_file.exists():
+            try:
+                items = json.loads(evidence_file.read_text(encoding="utf-8"))
+                accepted_ids = {e["evidence_id"] for e in items if e.get("accepted", True)}
+            except Exception:
+                pass
+
+        # Find all [E#] citations in the report
+        cited_e = set(re.findall(r'\[(E\d+)\]', report))
+
+        # Check each cited E ID
+        fake_citations = [eid for eid in cited_e if eid not in accepted_ids]
+        if fake_citations:
+            return "fail", f"Report cites evidence IDs not in accepted set: {', '.join(sorted(fake_citations))}"
+
+        if not cited_e and accepted_ids:
+            return "warning", "Report contains no evidence citations despite having accepted evidence available."
+
+        return "pass", "All cited evidence IDs are in the accepted evidence set."

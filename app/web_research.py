@@ -33,9 +33,15 @@ class WebResearcher:
         # 1. Search
         search_results = await self.search_backend.search(query, max_results=max_results)
         self.store.log_search(project_id, query, self.search_backend.backend_type, search_results)
-        
+
         if not search_results:
-            return {"query": query, "answer": "No search results found.", "sources": []}
+            return {
+                "query": query,
+                "answer": "No search results found.",
+                "sources": [],
+                "status": "completed_with_limitations",
+                "status_reason": "No search results were returned by the configured search backend.",
+            }
 
         # 2. Process Sources (Fetch & Extract)
         processed_sources = []
@@ -67,7 +73,13 @@ class WebResearcher:
 
         # 4. Synthesize Final Report
         if not processed_sources:
-            return {"query": query, "answer": "Failed to extract content from sources.", "sources": []}
+            return {
+                "query": query,
+                "answer": "Failed to extract content from sources.",
+                "sources": [],
+                "status": "completed_with_limitations",
+                "status_reason": "Sources were found but none yielded extractable content (all had insufficient word count or fetch failures).",
+            }
 
         final_answer = await self._synthesize_report(query, processed_sources)
         

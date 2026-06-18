@@ -784,33 +784,36 @@ class MacAgentClient:
         
         if stream:
             final_content = ""
-            agent_status = None
+            agent_status: Optional[str] = None
             raw_data = {}
             trace_id = None
             renderer = _StreamRenderer(stream_mode)
-            with self._http.stream("POST", f"{self.v1_base_url}/chat/completions", json=payload, headers=headers) as r:
-                r.raise_for_status()
-                for line in r.iter_lines():
-                    if not line or not line.startswith("data: "):
-                        continue
-                    data_str = line[len("data: "):]
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data_str)
-                        if "x_agent_status" in chunk:
-                            agent_status = chunk["x_agent_status"]
-                        if "x_trace_id" in chunk:
-                            trace_id = chunk["x_trace_id"]
-                        raw_data = chunk  # Keep the last chunk's meta
-                        
-                        delta = chunk.get("choices", [{}])[0].get("delta", {})
-                        if "content" in delta:
-                            content = delta["content"]
-                            final_content += content
-                            renderer.feed(content)
-                    except json.JSONDecodeError:
-                        continue
+            try:
+                with self._http.stream("POST", f"{self.v1_base_url}/chat/completions", json=payload, headers=headers) as r:
+                    r.raise_for_status()
+                    for line in r.iter_lines():
+                        if not line or not line.startswith("data: "):
+                            continue
+                        data_str = line[len("data: "):]
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            if "x_agent_status" in chunk:
+                                agent_status = chunk["x_agent_status"]
+                            if "x_trace_id" in chunk:
+                                trace_id = chunk["x_trace_id"]
+                            raw_data = chunk  # Keep the last chunk's meta
+
+                            delta = chunk.get("choices", [{}])[0].get("delta", {})
+                            if "content" in delta:
+                                content = delta["content"]
+                                final_content += content
+                                renderer.feed(content)
+                        except json.JSONDecodeError:
+                            continue
+            except Exception:
+                agent_status = "failed"
             renderer.finalize(trace_id=trace_id, agent_status=agent_status)
             return MacAgentResult(message=final_content, agent_status=agent_status, raw=raw_data)
         else:
@@ -854,33 +857,36 @@ class MacAgentClient:
 
         if stream:
             final_content = ""
-            agent_status = None
+            agent_status: Optional[str] = None
             raw_data = {}
             trace_id = None
             renderer = _StreamRenderer(stream_mode)
-            with self._http.stream("POST", f"{self.v1_base_url}/multi-agent/run", json=payload, headers=headers) as r:
-                r.raise_for_status()
-                for line in r.iter_lines():
-                    if not line or not line.startswith("data: "):
-                        continue
-                    data_str = line[len("data: "):]
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data_str)
-                        if "x_agent_status" in chunk:
-                            agent_status = chunk["x_agent_status"]
-                        if "x_trace_id" in chunk:
-                            trace_id = chunk["x_trace_id"]
-                        raw_data = chunk
+            try:
+                with self._http.stream("POST", f"{self.v1_base_url}/multi-agent/run", json=payload, headers=headers) as r:
+                    r.raise_for_status()
+                    for line in r.iter_lines():
+                        if not line or not line.startswith("data: "):
+                            continue
+                        data_str = line[len("data: "):]
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            if "x_agent_status" in chunk:
+                                agent_status = chunk["x_agent_status"]
+                            if "x_trace_id" in chunk:
+                                trace_id = chunk["x_trace_id"]
+                            raw_data = chunk
 
-                        delta = chunk.get("choices", [{}])[0].get("delta", {})
-                        if "content" in delta:
-                            content = delta["content"]
-                            final_content += content
-                            renderer.feed(content)
-                    except json.JSONDecodeError:
-                        continue
+                            delta = chunk.get("choices", [{}])[0].get("delta", {})
+                            if "content" in delta:
+                                content = delta["content"]
+                                final_content += content
+                                renderer.feed(content)
+                        except json.JSONDecodeError:
+                            continue
+            except Exception:
+                agent_status = "failed"
             renderer.finalize(trace_id=trace_id, agent_status=agent_status)
             return MacAgentResult(message=final_content, agent_status=agent_status, raw=raw_data)
         else:
@@ -1086,4 +1092,32 @@ class MacAgentClient:
     def workflow_run_evidence(self, run_id: str) -> Dict[str, Any]:
         headers = {"Authorization": f"Bearer {self.config.api_key}"}
         r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/evidence", headers=headers)
+        return r.json()
+
+    # ── v0.6.1 Runtime Hardening ──────────────────────────────────────
+
+    def workflow_cleanup(self, older_than: str = "7d", dry_run: bool = False) -> Dict[str, Any]:
+        """Clean up workflow runtime directories older than the given duration
+        (e.g. ``7d``, ``30d``, ``24h``). Returns count of cleaned runs.
+        When dry_run is True, returns candidate directories without deleting."""
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.post(
+            f"{self.v1_base_url}/workflows/cleanup",
+            json={"older_than": older_than, "dry_run": dry_run},
+            headers=headers,
+        )
+        return r.json()
+
+    def workflow_doctor(self, run_id: str) -> Dict[str, Any]:
+        """Diagnose a workflow run and return health information about
+        its state files, stages, and any detected anomalies."""
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/doctor", headers=headers)
+        return r.json()
+
+    def workflow_replay(self, run_id: str) -> Dict[str, Any]:
+        """Replay the trace of a completed workflow run for diagnostics.
+        Returns structured event log with timing information."""
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        r = self._http.get(f"{self.v1_base_url}/workflows/{run_id}/replay", headers=headers)
         return r.json()

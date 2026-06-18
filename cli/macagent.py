@@ -697,6 +697,17 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_wf = workflow_sub.add_parser("evidence", help="Retrieve evidence extracted for a workflow run")
     evidence_wf.add_argument("run_id", help="Workflow Run/Task ID")
 
+    # v0.6.1 Runtime Hardening: cleanup, doctor, replay
+    cleanup_wf = workflow_sub.add_parser("cleanup", help="Clean up old workflow runtime directories")
+    cleanup_wf.add_argument("--older-than", default="7d", help="Age threshold (default: 7d, e.g. 30d, 24h)")
+    cleanup_wf.add_argument("--dry-run", action="store_true", help="List candidates without deleting")
+
+    doctor_wf = workflow_sub.add_parser("doctor", help="Diagnose a workflow run for state health")
+    doctor_wf.add_argument("run_id", help="Workflow Run/Task ID")
+
+    replay_wf = workflow_sub.add_parser("replay", help="Replay a workflow run trace for diagnostics")
+    replay_wf.add_argument("run_id", help="Workflow Run/Task ID")
+
     research = sub.add_parser("research", help="Document research mode (runs as a task)")
     research_sub = research.add_subparsers(dest="research_cmd", required=True)
 
@@ -1214,8 +1225,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             if not stream:
                 _print_result(res, as_json=args.as_json)
-            if not args.as_json and res.agent_status:
-                print(f"\n[x_agent_status] {res.agent_status}", file=sys.stderr)
+            if not args.as_json:
+                status = res.agent_status or "failed"
+                print(f"\n[x_agent_status] {status}", file=sys.stderr)
             return 0
         if args.cmd == "multi-agent":
             stream_mode = getattr(args, "stream", None)
@@ -1229,8 +1241,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             if not stream:
                 _print_result(res, as_json=args.as_json)
-            if not args.as_json and res.agent_status:
-                print(f"\n[x_agent_status] {res.agent_status}", file=sys.stderr)
+            if not args.as_json:
+                status = res.agent_status or "failed"
+                print(f"\n[x_agent_status] {status}", file=sys.stderr)
             return 0
         if args.cmd == "trace":
             import json as _json
@@ -1974,6 +1987,72 @@ def main(argv: Optional[list[str]] = None) -> int:
             if args.workflow_cmd == "evidence":
                 out = client.workflow_run_evidence(args.run_id)
                 print(json.dumps(out, ensure_ascii=False, indent=2))
+                return 0
+
+            # v0.6.1 Runtime Hardening
+            if args.workflow_cmd == "cleanup":
+                dry_run = getattr(args, "dry_run", False)
+                out = client.workflow_cleanup(older_than=args.older_than, dry_run=dry_run)
+                if getattr(args, "as_json", False):
+                    print(json.dumps(out, ensure_ascii=False, indent=2))
+                    return 0
+                if dry_run:
+                    candidates = out.get("candidates") or []
+                    if candidates:
+                        print(f"Would clean up {len(candidates)} workflow run(s) older than {args.older_than}:")
+                        for c in candidates:
+                            print(f"  - {c}")
+                    else:
+                        print(f"No workflow runs older than {args.older_than} to clean up.")
+                else:
+                    print(f"Cleaned up {out.get('cleaned_count', 0)} workflow run(s) older than {args.older_than}.")
+                return 0
+
+            if args.workflow_cmd == "doctor":
+                out = client.workflow_doctor(args.run_id)
+                if getattr(args, "as_json", False):
+                    print(json.dumps(out, ensure_ascii=False, indent=2))
+                    return 0
+                print(f"Workflow Doctor for run {args.run_id}:")
+                print(f"  Status:  {out.get('status', 'unknown')}")
+                print(f"  State:   {out.get('state_health', 'unknown')}")
+                print(f"  Stages:  {out.get('stages_count', 0)} total, {out.get('stages_completed', 0)} completed")
+                anomalies = out.get("anomalies") or []
+                if anomalies:
+                    print(f"  Anomalies ({len(anomalies)}):")
+                    for a in anomalies:
+                        print(f"    - {a}")
+                else:
+                    print("  Anomalies: none")
+                if out.get("status") == "not_found":
+                    print("  (Run not found — no runtime data exists for this ID)")
+                return 0
+
+            if args.workflow_cmd == "replay":
+                out = client.workflow_replay(args.run_id)
+                if getattr(args, "as_json", False):
+                    print(json.dumps(out, ensure_ascii=False, indent=2))
+                    return 0
+                stages = out.get("stages") or []
+                if stages:
+                    print(f"Stage order ({len(stages)} total):")
+                    for i, s in enumerate(stages):
+                        sname = s.get("stage_name", s.get("name", f"stage_{i}"))
+                        sstat = s.get("status", "?")
+                        print(f"  {i+1}. {sname} [{sstat}]")
+                    print()
+                events = out.get("events") or []
+                print(f"Trace Replay for run {args.run_id} ({out.get('total_events', 0)} events):")
+                if not events:
+                    print("  (no events recorded)")
+                for e in events:
+                    ts = e.get("timestamp", "?")
+                    stage = e.get("stage_name", e.get("stage", "?"))
+                    tool = e.get("tool_name", "?")
+                    dur = e.get("duration_ms", "")
+                    dur_s = f" [{dur}ms]" if dur else ""
+                    status = e.get("status", "?")
+                    print(f"  [{ts}] [{stage}] {tool}{dur_s} -> {status}")
                 return 0
 
         if args.cmd == "research":

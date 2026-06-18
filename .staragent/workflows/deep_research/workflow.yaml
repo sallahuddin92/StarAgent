@@ -1,0 +1,188 @@
+description: Deep research ICM workflow with evidence collection, claim comparison,
+  synthesis, and citation verification.
+name: deep_research
+stages:
+- allowed_tools:
+  - read_file
+  - list_files
+  - search_files
+  - grep
+  approval_required: false
+  blocked_tools:
+  - write_file
+  - patch
+  - git
+  - shell
+  - docker
+  - run_command
+  directory: 01_scope
+  name: scope
+  purpose: Scope the research topic and identify key questions
+  required_outputs:
+  - .runtime/workflows/{run_id}/workflow_state.json
+  verifier: file_exists
+- allowed_tools:
+  - read_file
+  - list_files
+  - search_files
+  - grep
+  approval_required: false
+  blocked_tools:
+  - write_file
+  - patch
+  - git
+  - shell
+  - docker
+  - run_command
+  directory: 02_source_plan
+  name: source_plan
+  purpose: Create a plan for collecting sources and identify target domains
+  required_outputs:
+  - .runtime/workflows/{run_id}/sources.json
+  verifier: file_exists
+- allowed_tools:
+  - read_url_content
+  - read_browser_page
+  - search_web
+  - web_search
+  - web_research
+  - read_file
+  approval_required: false
+  blocked_tools:
+  - write_file
+  - patch
+  - git
+  - shell
+  - docker
+  - run_command
+  directory: 03_collect_sources
+  gates:
+  - arguments:
+      min_count: 3
+    type: source_count_min
+  - arguments:
+      min_domains: 2
+    type: source_diversity
+  name: collect_sources
+  purpose: Collect relevant source references, links, and documents
+  required_outputs: []
+  verifier: always_pass
+- allowed_tools:
+  - read_file
+  - write_file
+  - write_to_file
+  - replace_file_content
+  - patch
+  approval_required: false
+  blocked_tools:
+  - git
+  - shell
+  - docker
+  - run_command
+  directory: 04_extract_evidence
+  name: extract_evidence
+  purpose: Extract evidence tables and map assertions from collected sources
+  required_outputs:
+  - .runtime/workflows/{run_id}/evidence_table.md
+  verifier: file_exists
+- allowed_tools:
+  - read_file
+  - write_file
+  - write_to_file
+  - replace_file_content
+  - patch
+  approval_required: false
+  blocked_tools:
+  - git
+  - shell
+  - docker
+  - run_command
+  directory: 05_compare_claims
+  gates:
+  - arguments: {}
+    type: contradiction_check
+  name: compare_claims
+  purpose: Compare claims and identify contradictions or consensus in source materials
+  required_outputs:
+  - .runtime/workflows/{run_id}/claims_matrix.md
+  verifier: file_exists
+- allowed_tools:
+  - read_file
+  - write_file
+  - write_to_file
+  - replace_file_content
+  - patch
+  approval_required: true
+  blocked_tools:
+  - git
+  - shell
+  - docker
+  - run_command
+  directory: 06_synthesize
+  name: synthesize
+  purpose: Synthesize finding claims and build draft outline
+  required_outputs: []
+  verifier: always_pass
+- allowed_tools:
+  - read_file
+  - write_file
+  - write_to_file
+  - replace_file_content
+  - patch
+  approval_required: false
+  blocked_tools:
+  - git
+  - shell
+  - docker
+  - run_command
+  directory: 07_verify_citations
+  gates:
+  - arguments: {}
+    type: no_unsourced_claims
+  name: verify_citations
+  purpose: Verify citations and ensure no unsourced claims
+  required_outputs:
+  - .runtime/workflows/{run_id}/citation_audit.md
+  verifier: file_exists
+- allowed_tools:
+  - read_file
+  - write_file
+  - write_to_file
+  - replace_file_content
+  - patch
+  approval_required: false
+  blocked_tools:
+  - git
+  - shell
+  - docker
+  - run_command
+  directory: 08_write_report
+  gates:
+  - arguments: {}
+    type: final_report_exists
+  - arguments:
+      min_citations: 3
+    type: citation_required
+  - arguments:
+      max_quotes: 10
+    type: quote_limit
+  name: write_report
+  purpose: Compile final report combining outline, evidence, and citations
+  required_outputs:
+  - .runtime/workflows/{run_id}/final_report.md
+  verifier: file_exists
+- allowed_tools:
+  - read_file
+  approval_required: true
+  blocked_tools:
+  - write_file
+  - patch
+  - git
+  - shell
+  - docker
+  - run_command
+  directory: 09_review
+  name: review
+  purpose: Final review of report and citation mapping
+  required_outputs: []
+  verifier: always_pass

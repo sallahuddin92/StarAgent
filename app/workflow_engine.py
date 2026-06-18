@@ -11,6 +11,7 @@ from .database import DatabaseManager
 from .stage_engine import StageEngine
 from .workflow_trace import WorkflowTraceLogger, render_workflow_trace_tree
 from .checkpoint import list_task_checkpoints
+from .statuses import COMPLETED, COMPLETED_WITH_LIMITATIONS, FAILED_WITH_REASON
 
 logger = logging.getLogger(__name__)
 
@@ -264,7 +265,8 @@ WORKFLOW_TEMPLATES = {
                 "gates": [
                     {"type": "final_report_exists", "arguments": {}},
                     {"type": "citation_required", "arguments": {"min_citations": 3}},
-                    {"type": "quote_limit", "arguments": {"max_quotes": 10}}
+                    {"type": "quote_limit", "arguments": {"max_quotes": 10}},
+                    {"type": "unsupported_claims", "arguments": {}}
                 ]
             },
             {
@@ -810,14 +812,14 @@ class WorkflowEngine:
 
         # Check if all stages finished
         if current_stage_idx >= len(stages):
-            final_status = "completed"
+            final_status = COMPLETED
             final_summary = f"Workflow '{workflow_name}' executed and verified all stages successfully."
             
-            if workflow_name == "deep_research" and variables.get("status") == "completed_with_limitations":
-                final_status = "completed_with_limitations"
+            if workflow_name == "deep_research" and variables.get("status") == COMPLETED_WITH_LIMITATIONS:
+                final_status = COMPLETED_WITH_LIMITATIONS
                 final_summary = "Workflow deep_research completed with limitations: No configured live sources were available."
-            elif workflow_name == "deep_research" and variables.get("status") == "failed_with_reason":
-                final_status = "failed_with_reason"
+            elif workflow_name == "deep_research" and variables.get("status") == FAILED_WITH_REASON:
+                final_status = FAILED_WITH_REASON
                 final_summary = f"Workflow deep_research failed: {variables.get('failed_reason')}"
                 
             self.db.update_task_run(task_id, {
@@ -1205,7 +1207,8 @@ def test_calculate_add():
                     "results": [
                         {"type": "final_report_exists", "arguments": {}, "optional": False, "status": "pass", "message": "final_report.md exists"},
                         {"type": "citation_required", "arguments": {"min_citations": 3}, "optional": False, "status": "pass", "message": "Citations check passed"},
-                        {"type": "quote_limit", "arguments": {"max_quotes": 10}, "optional": False, "status": "pass", "message": "Quotes limit passed"}
+                        {"type": "quote_limit", "arguments": {"max_quotes": 10}, "optional": False, "status": "pass", "message": "Quotes limit passed"},
+                        {"type": "unsupported_claims", "arguments": {}, "optional": False, "status": "pass", "message": "All cited evidence IDs are in the accepted evidence set."}
                     ]
                 }
             }
@@ -1291,16 +1294,16 @@ def test_calculate_add():
                 )
 
             self.db.update_task_run(task_id, {
-                "status": "completed",
-                "final_verdict": "completed",
+                "status": COMPLETED,
+                "final_verdict": COMPLETED,
                 "final_summary": "Simple task executed and verified successfully (Fast Path)."
             })
         else:
             if progress_queue:
                 await progress_queue.put("[WORKFLOW] [FAST_PATH] Verification failed.\n")
             self.db.update_task_run(task_id, {
-                "status": "failed",
-                "final_verdict": "failed",
+                "status": FAILED_WITH_REASON,
+                "final_verdict": FAILED_WITH_REASON,
                 "final_summary": "Fast path verification failed."
             })
 
