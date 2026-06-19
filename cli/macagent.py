@@ -623,7 +623,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("continue", help="Continue pending partial task (send continue)")
     sub.add_parser("tui", help="Start the Terminal UI Dashboard")
 
-    sub.add_parser("status", help="Print health/models/context")
+    status_p = sub.add_parser("status", help="System status dashboard (health/ollama/memory/eval)")
+    status_p.add_argument("--verbose", action="store_true", help="Show detailed diagnostics")
     sub.add_parser("rollback", help="Best-effort rollback via agent path")
     sub.add_parser("smoke-test", help="Run compact smoke test against the API")
     sub.add_parser("doctor", help="Run release readiness diagnostics (health/profile/docs routes/trace/eval baseline)")
@@ -1551,11 +1552,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             _print_result(res, as_json=args.as_json)
             return 0
         if args.cmd == "status":
-            health = client.health()
-            models = client.models()
-            out = {"health": health, "models": models, "context": ctx, "base_url": client.v1_base_url}
-            print(json.dumps(out, ensure_ascii=False, indent=2))
-            return 0
+            from cli.status_dashboard import cmd_status
+            return cmd_status(args)
         if args.cmd == "smoke-test":
             out = client.smoke_test_compact()
             print(json.dumps(out, ensure_ascii=False, indent=2))
