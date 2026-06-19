@@ -241,9 +241,31 @@ class TestBuildClaimGraph:
                 cg.RUNTIME_DIR = old_rt
                 cg.WORKFLOW_RUNS_DIR = old_rt / "workflows"
 
-    def test_weak_claim_single_source(self):
+    def test_evidence_backed_claim_is_supported(self):
+        """Single evidence item backed by accepted evidence => supported."""
         evidence = [
-            {"evidence_id": "E1", "source_id": "S1",
+            {"evidence_id": "E1", "source_id": "S1", "accepted": True, "relevance_score": 0.9,
+             "assertion": "SQLite is serverless.",
+             "quote": "SQLite is serverless."},
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            import app.claim_graph as cg
+            old_rt = cg.RUNTIME_DIR
+            cg.RUNTIME_DIR = Path(tmpdir)
+            cg.WORKFLOW_RUNS_DIR = cg.RUNTIME_DIR / "workflows"
+            try:
+                graph = build_claim_graph(evidence, "test_supported")
+                for c in graph["claims"]:
+                    assert c["status"] == "supported"
+                    assert c["confidence"] >= 75
+            finally:
+                cg.RUNTIME_DIR = old_rt
+                cg.WORKFLOW_RUNS_DIR = old_rt / "workflows"
+
+    def test_non_accepted_evidence_is_weak(self):
+        """Evidence with accepted=False produces weak claims."""
+        evidence = [
+            {"evidence_id": "E1", "source_id": "S1", "accepted": False, "relevance_score": 0.1,
              "assertion": "SQLite is serverless.",
              "quote": "SQLite is serverless."},
         ]
@@ -256,10 +278,24 @@ class TestBuildClaimGraph:
                 graph = build_claim_graph(evidence, "test_weak")
                 for c in graph["claims"]:
                     assert c["status"] == "weak"
-                    assert c["confidence"] == 50
+                    assert c["confidence"] <= 30
             finally:
                 cg.RUNTIME_DIR = old_rt
                 cg.WORKFLOW_RUNS_DIR = old_rt / "workflows"
+
+    def test_claim_with_no_evidence_is_unsupported(self):
+        """A claim that appears in the graph with zero evidence_ids => unsupported."""
+        # This simulates the edge case by creating a claim with empty evidence_ids
+        from app.claim_graph import WORKFLOW_RUNS_DIR, RUNTIME_DIR as RT
+        # We can't easily produce this through build_claim_graph since it always
+        # attaches evidence, so test the metric function's handling
+        graph = {
+            "claims": [{"status": "unsupported", "confidence": 5}],
+            "edges": [],
+        }
+        metrics = claim_metrics(graph)
+        assert metrics["unsupported_count"] == 1
+        assert metrics["supported_count"] == 0
 
 
 # ── Claim Metrics ─────────────────────────────────────────────────
@@ -424,6 +460,40 @@ class TestResearchLoopIntegration:
                 assert "Average claim confidence" in content
             finally:
                 rl.WORKFLOW_RUNS_DIR = old_dir
+
+    def test_supported_claims_increase_final_confidence(self):
+        """More supported claims => higher final confidence."""
+        loop = ResearchLoop(ResearchLoopConfig(min_supported_claims=2))
+        sources = [{"source_id": "S1"}, {"source_id": "S2"}]
+        evidence = [
+            {"evidence_id": "E1", "source_id": "S1", "accepted": True, "relevance_score": 0.9,
+             "assertion": "SQLite is serverless.", "quote": "SQLite is serverless."},
+            {"evidence_id": "E2", "source_id": "S2", "accepted": True, "relevance_score": 0.9,
+             "assertion": "SQLite is serverless.", "quote": "SQLite is serverless."},
+        ]
+        report = "SQLite [E1] [E2]"
+        claim_graph = {
+            "claims": [{"status": "supported", "support_count": 2, "confidence": 85}],
+            "edges": [],
+        }
+        conf_with = loop.compute_confidence(sources, evidence, report, claim_graph=claim_graph)
+        conf_without = loop.compute_confidence(sources, evidence, report)
+        assert conf_with >= conf_without
+
+
+# ── Report Gating Tests ──────────────────────────────────────────
+
+class TestReportGating:
+    def test_limitation_for_zero_supported(self):
+        """_build_limitation_report produces expected output when no claims supported."""
+        loop = ResearchLoop(ResearchLoopConfig(min_supported_claims=3))
+        question = "What are tradeoffs between SQLite and PostgreSQL?"
+        cg_metrics = {"total_claims": 30, "supported_count": 0,
+                       "weak_count": 30, "contradicted_count": 0}
+        report = loop._build_limitation_report(question, cg_metrics)
+        assert "# Deep Research" in report
+        assert "no supported claims" in report.lower()
+        assert "completed_with_limitations" in report
 
 
 # ── Benchmark Integration ────────────────────────────────────────

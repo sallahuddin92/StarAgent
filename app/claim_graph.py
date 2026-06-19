@@ -126,12 +126,18 @@ def build_claim_graph(
     edges: List[Dict[str, Any]] = []
     claim_counter = 1
 
+    # Collect accepted evidence IDs for classification
+    accepted_eids = {ev.get("evidence_id", "")
+                     for ev in evidence_items
+                     if ev.get("accepted", True) and ev.get("relevance_score", 0.3) >= 0.3}
+
     # Step 1 & 2: Extract atomic claims from each evidence item
     for ev in evidence_items:
         eid = ev.get("evidence_id", "")
         sid = ev.get("source_id", "")
         assertion = ev.get("assertion", "")
         quote = ev.get("quote", "")
+        is_accepted = eid in accepted_eids
 
         atomic = _split_atomic_claims(assertion)
         if not atomic:
@@ -153,10 +159,12 @@ def build_claim_graph(
                 cid = existing
                 claims[cid]["source_ids"].append(sid)
                 claims[cid]["evidence_ids"].append(eid)
-                # Deduplicate
                 claims[cid]["source_ids"] = list(set(claims[cid]["source_ids"]))
                 claims[cid]["evidence_ids"] = list(set(claims[cid]["evidence_ids"]))
                 claims[cid]["support_count"] += 1
+                # Track if any backing evidence is accepted
+                if is_accepted:
+                    claims[cid]["_has_accepted"] = True
             else:
                 cid = f"C{claim_counter}"
                 claim_counter += 1
@@ -167,8 +175,8 @@ def build_claim_graph(
                     "evidence_ids": [eid],
                     "support_count": 1,
                     "contradiction_count": 0,
-                    "confidence": 70,  # base confidence
-                    "status": "supported",
+                    "confidence": 85,  # high base for evidence-backed
+                    "_has_accepted": is_accepted,
                 }
 
             edges.append({"from": cid, "to": eid, "type": "supported_by"})
@@ -181,7 +189,6 @@ def build_claim_graph(
             cb = claims[claim_list[j]]
             # Skip if same source — no self-contradiction
             if set(ca["source_ids"]) & set(cb["source_ids"]):
-                # Same source, same text — not a contradiction
                 if _normalize(ca["text"]) == _normalize(cb["text"]):
                     continue
 
@@ -197,23 +204,28 @@ def build_claim_graph(
                     "to": cb["claim_id"],
                     "type": "contradicts",
                 })
-                # Update status
-                for c in (ca, cb):
-                    c["status"] = "contradicted" if c["contradiction_count"] > 0 else c["status"]
 
-    # Recalculate confidence and status
+    # Final classification: supported/weak/contradicted/unsupported
     for cid, cdata in claims.items():
-        # Supported claims: higher confidence
-        if cdata["support_count"] >= 2:
-            cdata["confidence"] = min(100, 70 + 10 * cdata["support_count"])
+        has_accepted = cdata.pop("_has_accepted", False)
+        has_evidence = bool(cdata["evidence_ids"])
+
         if cdata["contradiction_count"] > 0:
-            cdata["confidence"] = max(10, cdata["confidence"] - 40)
             cdata["status"] = "contradicted"
-        elif cdata["support_count"] == 1:
-            cdata["confidence"] = 50
+            cdata["confidence"] = max(10, 85 - 25 * cdata["contradiction_count"])
+        elif has_accepted:
+            # Backed by accepted evidence — supported
+            boost = min(15, 5 * (len(cdata["evidence_ids"]) - 1))
+            cdata["confidence"] = min(100, 75 + boost)
+            cdata["status"] = "supported"
+        elif has_evidence:
+            # Has evidence but none accepted — weak
+            cdata["confidence"] = 30
             cdata["status"] = "weak"
         else:
-            cdata["status"] = "supported"
+            # No evidence at all — unsupported
+            cdata["confidence"] = 5
+            cdata["status"] = "unsupported"
 
     graph = {
         "claims": list(claims.values()),

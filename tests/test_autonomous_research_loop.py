@@ -171,6 +171,56 @@ class TestConfidenceScoring:
         score = loop.compute_confidence(sources, evidence, report)
         assert score <= 65
 
+    def test_low_citation_coverage_caps_confidence(self, loop):
+        """Evidence coverage < 50% caps confidence at 70."""
+        sources = [{"source_id": "S1"}, {"source_id": "S2"}, {"source_id": "S3"}]
+        evidence = [
+            {"evidence_id": "E1", "source_id": "S1", "accepted": True},
+            {"evidence_id": "E2", "source_id": "S2", "accepted": True},
+            {"evidence_id": "E3", "source_id": "S3", "accepted": True},
+            {"evidence_id": "E4", "source_id": "S1", "accepted": True},
+            {"evidence_id": "E5", "source_id": "S2", "accepted": True},
+        ]
+        # Only 2/5 evidence items cited = 40% coverage
+        report = "## Summary [E1] [E2]"
+        score = loop.compute_confidence(sources, evidence, report)
+        assert score <= 70
+        assert score >= 0
+
+    def test_coverage_60_pct_caps_at_85(self, loop):
+        """Evidence coverage between 50-75% caps confidence at 85."""
+        sources = [{"source_id": "S1"}, {"source_id": "S2"}, {"source_id": "S3"}]
+        evidence = [
+            {"evidence_id": "E1", "source_id": "S1", "accepted": True},
+            {"evidence_id": "E2", "source_id": "S2", "accepted": True},
+            {"evidence_id": "E3", "source_id": "S3", "accepted": True},
+            {"evidence_id": "E4", "source_id": "S1", "accepted": True},
+            {"evidence_id": "E5", "source_id": "S2", "accepted": True},
+        ]
+        # 3/5 evidence items cited = 60% coverage, < 75% triggers 85 cap
+        report = "## Summary [E1] [E2] [E3]"
+        score = loop.compute_confidence(sources, evidence, report)
+        # 60% < 75% so 85 cap applies
+        assert score <= 85
+
+    def test_full_coverage_no_citation_cap(self, loop):
+        """Evidence coverage >= 75% does not trigger coverage cap."""
+        sources = [{"source_id": "S1"}, {"source_id": "S2"}, {"source_id": "S3"},
+                   {"source_id": "S4"}, {"source_id": "S5"}]
+        evidence = [
+            {"evidence_id": "E1", "source_id": "S1", "accepted": True},
+            {"evidence_id": "E2", "source_id": "S2", "accepted": True},
+            {"evidence_id": "E3", "source_id": "S3", "accepted": True},
+            {"evidence_id": "E4", "source_id": "S4", "accepted": True},
+            {"evidence_id": "E5", "source_id": "S5", "accepted": True},
+        ]
+        # 5/5 cited = 100% coverage, >= 75% so no coverage cap
+        report = "## Summary [E1] [E2] [E3] [E4] [E5]"
+        score = loop.compute_confidence(sources, evidence, report)
+        # 5 sources, 5 evidence, all cited — base score is high
+        # No coverage cap, no evidence cap (5 >= 5)
+        assert score > 85  # above 85 cap threshold means no coverage cap applied
+
 
 # ── Gap Detection Tests ────────────────────────────────────────────
 
@@ -353,6 +403,27 @@ class TestDecideNextAction:
                                           prev_evidence_count=5, current_evidence_count=5)
         assert action == "continue"  # would continue instead of stopping
 
+    def test_low_citation_coverage_blocks_stop_confidence_met(self, loop):
+        """low_citation_coverage hard gap blocks stop_confidence_met even at high confidence."""
+        action = loop.decide_next_action(1, 85, ["low_citation_coverage"],
+                                          prev_evidence_count=0, current_evidence_count=5)
+        assert action != "stop_confidence_met"
+        assert action == "continue"  # evidence improving
+
+    def test_no_low_citation_gap_allows_stop_confidence_met(self, loop):
+        """Without low_citation_coverage gap, stop_confidence_met is possible at 80% coverage."""
+        action = loop.decide_next_action(1, 80, [],
+                                          prev_evidence_count=0, current_evidence_count=5)
+        assert action == "stop_confidence_met"
+
+    def test_manual_low_coverage_scenario_not_stop(self, loop):
+        """Replicates the bug scenario: 33% coverage, confidence 100, low_citation_coverage gap must block."""
+        gaps = ["low_citation_coverage"]
+        action = loop.decide_next_action(1, 100, gaps,
+                                          prev_evidence_count=0, current_evidence_count=3)
+        assert action != "stop_confidence_met"
+        assert action == "continue"  # evidence is improving from 0 to 3
+
 
 # ── Loop State Tests ───────────────────────────────────────────────
 
@@ -429,6 +500,35 @@ class TestLoopState:
             assert "too_few_sources" in content
             assert "Usable sources: 1" in content
             assert "Failed sources: 0" in content
+        finally:
+            rl.WORKFLOW_RUNS_DIR = original
+
+    def test_append_confidence_section_includes_cap_reason(self, tmp_path, loop):
+        """When citation coverage < 50%, the confidence section includes cap reason."""
+        import app.research_loop as rl
+        original = rl.WORKFLOW_RUNS_DIR
+        rl.WORKFLOW_RUNS_DIR = tmp_path / ".runtime" / "workflows"
+
+        wf_dir = tmp_path / ".runtime" / "workflows" / "cap_reason_run"
+        wf_dir.mkdir(parents=True)
+        report_path = wf_dir / "final_report.md"
+        report_path.write_text("# Deep Research: Test\n## Summary\nSome content [E1].\n", encoding="utf-8")
+
+        sources = [{"source_id": "S1", "title": "S1"}, {"source_id": "S2", "title": "S2"}]
+        evidence = [
+            {"evidence_id": "E1", "source_id": "S1", "accepted": True},
+            {"evidence_id": "E2", "source_id": "S2", "accepted": True},
+            {"evidence_id": "E3", "source_id": "S1", "accepted": True},
+        ]
+        report = report_path.read_text(encoding="utf-8")
+
+        try:
+            loop.append_confidence_section("cap_reason_run", 60, ["low_citation_coverage"],
+                                           "stop_no_new_evidence", sources, evidence, report)
+            content = report_path.read_text(encoding="utf-8")
+            # 1/3 cited = 33.3% → < 50% → cap reason should mention below 50%
+            assert "Confidence cap reason" in content
+            assert "below 50%" in content
         finally:
             rl.WORKFLOW_RUNS_DIR = original
 

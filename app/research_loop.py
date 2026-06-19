@@ -159,6 +159,17 @@ class ResearchLoop:
         if any(eid not in valid_eids for eid in cited_eids):
             total = min(total, 50)
 
+        # Citation/evidence coverage caps
+        if accepted:
+            cited_count = sum(1 for e in accepted if e.get("evidence_id", "") in cited_eids)
+            evidence_coverage = cited_count / len(accepted)
+        else:
+            evidence_coverage = 0.0
+        if evidence_coverage < 0.50:
+            total = min(total, 70)
+        elif evidence_coverage < 0.75:
+            total = min(total, 85)
+
         return max(0, min(100, total))
 
     # ── Gap Detection ───────────────────────────────────────────────
@@ -241,6 +252,7 @@ class ResearchLoop:
         "unsupported_claims",
         "contradictions_unresolved",
         "too_few_supported_claims",
+        "low_citation_coverage",
     })
 
     def decide_next_action(
@@ -353,6 +365,28 @@ class ResearchLoop:
         source_ids = {e.get("source_id", "") for e in evidence_items if e.get("source_id")}
         return f"{len(source_ids)} unique domains"
 
+    @staticmethod
+    def _build_limitation_report(question: str, cg_metrics: Dict[str, Any]) -> str:
+        """Build a limitation report when no supported claims pass verification."""
+        return (
+            f"# Deep Research: {question}\n\n"
+            f"## Summary\n"
+            f"Evidence was extracted, but no supported claims passed claim verification.\n\n"
+            f"## Limitations\n"
+            f"While {cg_metrics.get('total_claims', 0)} raw claims were identified from the source "
+            f"evidence, none of them met the required quality threshold for supported claims. "
+            f"This may indicate conflicting information, low-confidence assertions, "
+            f"or insufficient corroboration across multiple sources.\n\n"
+            f"- Total claims identified: {cg_metrics.get('total_claims', 0)}\n"
+            f"- Weak claims (single source, no corroboration): {cg_metrics.get('weak_count', 0)}\n"
+            f"- Contradicted claims: {cg_metrics.get('contradicted_count', 0)}\n"
+            f"\n## Citations\n"
+            f"No verified supported claims to cite.\n\n"
+            f"---\n"
+            f"**Status**: completed_with_limitations\n"
+            f"**Reason**: No supported claims passed claim verification.\n"
+        )
+
     def append_confidence_section(
         self,
         run_id: str,
@@ -394,6 +428,17 @@ class ResearchLoop:
                 f"- Average claim confidence: {metrics['claim_confidence_avg']}\n"
             )
 
+        # Confidence cap reason
+        cap_reason = ""
+        if coverage < 50.0:
+            cap_reason = (
+                f"- Confidence cap reason: Citation/evidence coverage is below 50%.\n"
+            )
+        elif coverage < 75.0:
+            cap_reason = (
+                f"- Confidence cap reason: Citation/evidence coverage is below 75%.\n"
+            )
+
         section = (
             f"\n\n## Research Confidence\n"
             f"- Overall confidence: {confidence}/100\n"
@@ -402,6 +447,7 @@ class ResearchLoop:
             f"- Usable sources: {len(usable_sources)}\n"
             f"- Failed sources: {len(failed_sources)}\n"
             f"{claim_section}"
+            f"{cap_reason}"
             f"- Remaining gaps: {gap_str}\n"
             f"- Stop reason: {stop_labels.get(stop_reason, stop_reason)}\n"
         )
@@ -577,6 +623,39 @@ class ResearchLoop:
 
         # After loop: write final state with actual final decision
         self.write_loop_state(base_run_id, iterations, final_decision, final_confidence)
+
+        # ── Report gating based on claim graph ──────────────────────
+        if final_report_content:
+            cg = read_claim_graph(base_run_id)
+            cg_metrics = claim_metrics(cg)
+            supported = cg_metrics["supported_count"]
+            min_sc = self.config.min_supported_claims
+
+            if supported == 0 and cg_metrics["total_claims"] > 0:
+                limitation = self._build_limitation_report(question, cg_metrics)
+                wf_dir = WORKFLOW_RUNS_DIR / base_run_id
+                report_path = wf_dir / "final_report.md"
+                report_path.write_text(limitation, encoding="utf-8")
+                final_report_content = limitation
+            elif 0 < supported < min_sc:
+                caution = (
+                    f"> **Preliminary findings**: Only {supported} of {min_sc} minimum required claims "
+                    f"are sufficiently supported. Results should be verified with additional sources.\n\n"
+                )
+                wf_dir = WORKFLOW_RUNS_DIR / base_run_id
+                report_path = wf_dir / "final_report.md"
+                if report_path.is_file():
+                    existing = report_path.read_text(encoding="utf-8")
+                    if existing.startswith("#"):
+                        first_nl = existing.find("\n", existing.find("\n") + 1)
+                        if first_nl > 0:
+                            existing = existing[:first_nl] + "\n\n" + caution + existing[first_nl:].lstrip("\n")
+                        else:
+                            existing = caution + existing
+                    else:
+                        existing = caution + existing
+                    report_path.write_text(existing, encoding="utf-8")
+                    final_report_content = existing
 
         # Append confidence section to final report
         if final_report_content:
