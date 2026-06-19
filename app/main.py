@@ -29,8 +29,10 @@ from .models import (
     ChatCompletionStreamResponse,
     MemoryCompactionRequest,
     ProjectInfo,
+    PromptAudit,
+    PromptAuditRequest,
 )
-from .prompting import build_system_prompt, MemoryCompactor
+from .prompting import build_system_prompt, build_system_prompt_with_audit, MemoryCompactor
 from .database import get_db, DatabaseManager
 from .retrieval import SemanticRetriever, EmbeddingModel, retrieve_context
 from .tokenbudget import get_budget_manager, TokenBudgetManager, TokenCounter
@@ -78,6 +80,11 @@ ENABLE_MEMORY_UPDATE = os.getenv("ENABLE_MEMORY_UPDATE", "true").lower() == "tru
 USE_SEMANTIC_SEARCH = os.getenv("USE_SEMANTIC_SEARCH", "true").lower() == "true"
 USE_STREAMING = os.getenv("USE_STREAMING", "true").lower() == "true"
 COMPACTION_INTERVAL = int(os.getenv("COMPACTION_INTERVAL", "100"))  # Turns
+PROMPT_MODE = os.getenv("PROMPT_MODE", "normal").lower()
+MAX_MEMORY_TOKENS = int(os.getenv("MAX_MEMORY_TOKENS", "1024"))
+INCLUDE_HISTORICAL_DEFAULT = os.getenv("INCLUDE_HISTORICAL_DEFAULT", "false").lower() == "true"
+PROMPT_AUDIT_ENABLED = os.getenv("PROMPT_AUDIT_ENABLED", "false").lower() == "true"
+PROMPT_AUDIT_SAVE_LAST = os.getenv("PROMPT_AUDIT_SAVE_LAST", "false").lower() == "true"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 # Logging setup
@@ -865,21 +872,21 @@ async def _chat_completions_non_streaming(
     
     # Semantic retrieval
     retrieved_items = []
-    # Dual-Layer Semantic Retrieval: 
+    # Dual-Layer Semantic Retrieval:
     # 1. Local items (this chat only)
     # 2. Global items (Decisions/Constraints/Style across the whole project)
     retrieved_items = []
     if USE_SEMANTIC_SEARCH:
-        # Fetch current conversation's full context
-        local_items = db.get_memory_items(conversation_id, project_id)
-        
+        # Fetch current conversation's full context (exclude rejected)
+        local_items = db.get_memory_items(conversation_id, project_id, exclude_rejected=True)
+
         # Fetch project-wide knowledge (Categories that should be shared)
         global_items = []
         for cat in ["decision", "constraint", "style_preferences"]:
-            global_items.extend(db.get_memory_items(None, project_id, category=cat))
-        
+            global_items.extend(db.get_memory_items(None, project_id, category=cat, exclude_rejected=True))
+
         all_sources = local_items + global_items
-        
+
         retrieved_items = await retrieve_context(
             latest_user_text,
             all_sources,
@@ -888,18 +895,48 @@ async def _chat_completions_non_streaming(
         )
 
 
-    
+
     retrieved_text = store.retrieve_relevant(memory, latest_user_text, retrieved_items)
-    
-    # Build system prompt
-    system_prompt = build_system_prompt(memory, retrieved_text)
-    
+
+    # Detect conflicts in working memory (v0.8.2)
+    memory_conflicts = store._detect_conflicts({
+        "project_summary": getattr(memory, "project_summary", []),
+        "decisions": getattr(memory, "decisions", []),
+        "constraints": getattr(memory, "constraints", []),
+        "issues": getattr(memory, "issues", []),
+        "style_preferences": getattr(memory, "style_preferences", []),
+    }) if hasattr(store, '_detect_conflicts') else []
+
+    # Build system prompt (v0.8.3 — token efficiency mode support)
+    # v0.8.4: optional audit save-to-file
+    if PROMPT_AUDIT_ENABLED and PROMPT_AUDIT_SAVE_LAST:
+        system_prompt, prompt_audit = build_system_prompt_with_audit(
+            memory,
+            retrieved_text,
+            conflicts=memory_conflicts,
+            mode=PROMPT_MODE,
+            max_memory_tokens=MAX_MEMORY_TOKENS,
+            include_historical=INCLUDE_HISTORICAL_DEFAULT,
+            token_counter=token_counter,
+        )
+        _save_prompt_audit(prompt_audit)
+    else:
+        system_prompt = build_system_prompt(
+            memory,
+            retrieved_text,
+            conflicts=memory_conflicts,
+            mode=PROMPT_MODE,
+            max_memory_tokens=MAX_MEMORY_TOKENS,
+            include_historical=INCLUDE_HISTORICAL_DEFAULT,
+            token_counter=token_counter,
+        )
+
     # Prepare messages for Ollama
     ollama_messages = [{"role": "system", "content": system_prompt}]
     recent_messages = request.messages[-6:]
     for msg in recent_messages:
         ollama_messages.append({"role": msg.role, "content": _content_to_text(msg.content)})
-    
+
     # Token budgeting
     prompt_tokens = token_counter.count_messages_tokens(ollama_messages)
     budget_manager.record_prompt_tokens(conversation_id, prompt_tokens)
@@ -998,13 +1035,13 @@ async def _stream_chat_completions(request: ChatCompletionRequest) -> AsyncGener
     # Dual-Layer Semantic Retrieval
     retrieved_items = []
     if USE_SEMANTIC_SEARCH:
-        local_items = db.get_memory_items(conversation_id, project_id)
+        local_items = db.get_memory_items(conversation_id, project_id, exclude_rejected=True)
         global_items = []
         for cat in ["decision", "constraint", "style_preferences"]:
-            global_items.extend(db.get_memory_items(None, project_id, category=cat))
-        
+            global_items.extend(db.get_memory_items(None, project_id, category=cat, exclude_rejected=True))
+
         all_sources = local_items + global_items
-        
+
         retrieved_items = await retrieve_context(
             latest_user_text,
             all_sources,
@@ -1012,12 +1049,42 @@ async def _stream_chat_completions(request: ChatCompletionRequest) -> AsyncGener
             embedding_model=embedding_model
         )
 
-    
+
     retrieved_text = store.retrieve_relevant(memory, latest_user_text, retrieved_items)
-    
-    # Build system prompt
-    system_prompt = build_system_prompt(memory, retrieved_text)
-    
+
+    # Detect conflicts in working memory (v0.8.2)
+    memory_conflicts = store._detect_conflicts({
+        "project_summary": getattr(memory, "project_summary", []),
+        "decisions": getattr(memory, "decisions", []),
+        "constraints": getattr(memory, "constraints", []),
+        "issues": getattr(memory, "issues", []),
+        "style_preferences": getattr(memory, "style_preferences", []),
+    }) if hasattr(store, '_detect_conflicts') else []
+
+    # Build system prompt (v0.8.3 — token efficiency mode support)
+    # v0.8.4: optional audit save-to-file
+    if PROMPT_AUDIT_ENABLED and PROMPT_AUDIT_SAVE_LAST:
+        system_prompt, prompt_audit = build_system_prompt_with_audit(
+            memory,
+            retrieved_text,
+            conflicts=memory_conflicts,
+            mode=PROMPT_MODE,
+            max_memory_tokens=MAX_MEMORY_TOKENS,
+            include_historical=INCLUDE_HISTORICAL_DEFAULT,
+            token_counter=token_counter,
+        )
+        _save_prompt_audit(prompt_audit)
+    else:
+        system_prompt = build_system_prompt(
+            memory,
+            retrieved_text,
+            conflicts=memory_conflicts,
+            mode=PROMPT_MODE,
+            max_memory_tokens=MAX_MEMORY_TOKENS,
+            include_historical=INCLUDE_HISTORICAL_DEFAULT,
+            token_counter=token_counter,
+        )
+
     # Prepare messages
     ollama_messages = [{"role": "system", "content": system_prompt}]
     recent_messages = request.messages[-6:]
@@ -1186,6 +1253,70 @@ async def compact_memory(
         "items_created": result["items_created"],
         "summary": result["summary"],
         "compacted_at": datetime.utcnow().isoformat(),
+    })
+
+
+# ============================================================================
+# Memory Authority Endpoints (v0.8.2)
+# ============================================================================
+
+
+@app.post("/v1/memory/authority/update")
+async def memory_authority_update(
+    memory_item_id: str,
+    status: str = "active",
+    supersedes_id: Optional[str] = None,
+    authority_score: Optional[float] = None,
+    project_id: str = "default",
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    """Update a memory item's authority status."""
+    _validate_api_key(authorization)
+    item = db.update_memory_item_status(memory_item_id, status, superseded_by_id=supersedes_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Memory item not found")
+    # Update authority_score if provided
+    if authority_score is not None and item:
+        from .database import MemoryItem
+        session = db.get_session()
+        try:
+            session.query(MemoryItem).filter_by(id=memory_item_id).update(
+                {"authority_score": authority_score}
+            )
+            session.commit()
+        finally:
+            session.close()
+    return JSONResponse(content={
+        "id": memory_item_id,
+        "status": status,
+        "supersedes_id": supersedes_id,
+        "authority_score": authority_score,
+    })
+
+
+@app.post("/v1/memory/authority/resolve")
+async def memory_authority_resolve(
+    conflict_id: str,
+    keep_item_id: str,
+    supersede_item_id: str,
+    note: Optional[str] = None,
+    project_id: str = "default",
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    """Resolve a conflict between two memory items by marking one as superseded."""
+    _validate_api_key(authorization)
+    kept = db.update_memory_item_status(keep_item_id, "active")
+    superseded = db.update_memory_item_status(
+        supersede_item_id, "superseded", superseded_by_id=keep_item_id
+    )
+    if not kept or not superseded:
+        raise HTTPException(status_code=404, detail="One or both memory items not found")
+    return JSONResponse(content={
+        "conflict_id": conflict_id,
+        "status": "resolved",
+        "kept_item_id": keep_item_id,
+        "superseded_item_id": supersede_item_id,
+        "note": note,
     })
 
 
@@ -1810,6 +1941,22 @@ async def _compact_memory_async(conversation_id: str, project_id: str, memory):
         logger.error(f"Auto-compaction failed: {e}")
 
 
+def _save_prompt_audit(audit: PromptAudit) -> None:
+    """Write prompt audit to data/last_prompt_audit.json (v0.8.4).
+
+    Does not store the full prompt text — only audit metadata.
+    """
+    try:
+        save_path = Path("data/last_prompt_audit.json")
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        save_path.write_text(
+            audit.model_dump_json(indent=2, exclude={"section_tokens": False}),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning(f"Failed to save prompt audit: {e}")
+
+
 def _validate_api_key(authorization: Optional[str]) -> None:
     """Validate API key from Authorization header."""
     if not PROXY_API_KEY:
@@ -1835,6 +1982,16 @@ def _content_to_text(content: Any) -> str:
                 parts.append(str(item))
         return "\n".join(parts)
     return str(content)
+
+
+def _derive_conversation_id_from_messages(messages: List[ChatMessage]) -> str:
+    """Derive conversation ID from a raw message list."""
+    seed_parts = []
+    if messages:
+        for message in messages[-3:]:
+            seed_parts.append(_content_to_text(message.content)[:80])
+    seed = "|".join(seed_parts).strip() or "default"
+    return seed[:80]
 
 
 def _derive_conversation_id(request: ChatCompletionRequest) -> str:
@@ -2644,3 +2801,79 @@ async def benchmark_leaderboard(authorization: Optional[str] = Header(default=No
     from app.benchmark_engine import BenchmarkEngine
     board = BenchmarkEngine.leaderboard()
     return {"leaderboard": board}
+
+
+@app.get("/v1/config/prompt-mode")
+async def get_prompt_mode_config(authorization: Optional[str] = Header(default=None)):
+    """Return current token efficiency mode configuration (v0.8.3)."""
+    _validate_api_key(authorization)
+    return {
+        "prompt_mode": PROMPT_MODE,
+        "max_memory_tokens": MAX_MEMORY_TOKENS,
+        "include_historical_default": INCLUDE_HISTORICAL_DEFAULT,
+    }
+
+
+@app.post("/v1/prompt/audit")
+async def audit_prompt(
+    body: PromptAuditRequest,
+    authorization: Optional[str] = Header(default=None),
+) -> JSONResponse:
+    """Audit system prompt assembly without calling a provider (v0.8.4).
+
+    Reuses the same memory load + retrieval + conflict detection pipeline
+    as the chat completions endpoint, but returns the assembled prompt
+    preview and audit metadata instead of sending it to Ollama.
+    """
+    _validate_api_key(authorization)
+
+    # Derive conversation_id from request
+    conv_id = body.conversation_id or _derive_conversation_id_from_messages(body.messages)
+    project_id = body.project_id
+
+    # Load memory
+    memory = store.load(conv_id, project_id)
+
+    # Extract user text
+    user_messages = [m for m in body.messages if m.role == "user"]
+    latest_user_text = _content_to_text(user_messages[-1].content if user_messages else "")
+
+    # Retrieve context
+    retrieved_items = []
+    if USE_SEMANTIC_SEARCH and latest_user_text:
+        local_items = db.get_memory_items(conv_id, project_id, exclude_rejected=True)
+        global_items = []
+        for cat in ["decision", "constraint", "style_preferences"]:
+            global_items.extend(db.get_memory_items(None, project_id, category=cat, exclude_rejected=True))
+        all_sources = local_items + global_items
+        retrieved_items = await retrieve_context(
+            latest_user_text, all_sources,
+            top_k=MAX_RETRIEVED_ITEMS, embedding_model=embedding_model,
+        )
+
+    retrieved_text = store.retrieve_relevant(memory, latest_user_text, retrieved_items)
+
+    # Detect conflicts
+    memory_conflicts = store._detect_conflicts({
+        "project_summary": getattr(memory, "project_summary", []),
+        "decisions": getattr(memory, "decisions", []),
+        "constraints": getattr(memory, "constraints", []),
+        "issues": getattr(memory, "issues", []),
+        "style_preferences": getattr(memory, "style_preferences", []),
+    }) if hasattr(store, '_detect_conflicts') else []
+
+    # Build with audit
+    prompt_text, audit = build_system_prompt_with_audit(
+        memory,
+        retrieved_text,
+        conflicts=memory_conflicts,
+        mode=body.mode,
+        max_memory_tokens=body.max_memory_tokens or MAX_MEMORY_TOKENS,
+        include_historical=body.include_historical,
+        token_counter=token_counter,
+    )
+
+    return JSONResponse(content={
+        "assembled_prompt_preview": prompt_text[:500],
+        "audit": audit.model_dump(),
+    })

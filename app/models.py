@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 from datetime import datetime
 from pydantic import BaseModel, Field
 
@@ -28,11 +28,11 @@ class MemoryState(BaseModel):
     }
     conversation_id: str
     project_id: str = "default"
-    project_summary: List[str] = Field(default_factory=list)
-    decisions: List[str] = Field(default_factory=list)
-    constraints: List[str] = Field(default_factory=list)
-    issues: List[str] = Field(default_factory=list)
-    style_preferences: List[str] = Field(default_factory=list)
+    project_summary: List[Union[str, Dict[str, Any]]] = Field(default_factory=list)
+    decisions: List[Union[str, Dict[str, Any]]] = Field(default_factory=list)
+    constraints: List[Union[str, Dict[str, Any]]] = Field(default_factory=list)
+    issues: List[Union[str, Dict[str, Any]]] = Field(default_factory=list)
+    style_preferences: List[Union[str, Dict[str, Any]]] = Field(default_factory=list)
     archive_turns: List[Dict[str, str]] = Field(default_factory=list)
     turn_count: int = 0
     # Agent-path continuation state (canonical in SQLite; legacy JSON sidecar is fallback/import only).
@@ -93,6 +93,11 @@ class RetrievedMemoryItem(BaseModel):
     category: str
     content: str
     relevance_score: float
+    status: MemoryStatus = "active"
+    supersedes_id: Optional[str] = None
+    superseded_by_id: Optional[str] = None
+    authority_score: float = 1.0
+    source_type: Optional[str] = None
 
 
 class MemoryCompactionResponse(BaseModel):
@@ -108,6 +113,8 @@ class MemoryCompactionResponse(BaseModel):
 # ============================================================================
 # Phase 4: Iterative Task Engine + Document Research Mode
 # ============================================================================
+
+MemoryStatus = Literal["active", "superseded", "rejected", "stale", "unknown"]
 
 TaskStatus = Literal["pending", "running", "paused", "completed", "failed", "partial"]
 
@@ -203,3 +210,34 @@ class PresetRunRequest(BaseModel):
     max_steps: Optional[int] = None
     max_retries: Optional[int] = None
     run_now: bool = True
+
+
+# ============================================================================
+# v0.8.4: Prompt Audit Layer
+# ============================================================================
+
+
+class PromptAudit(BaseModel):
+    """Audit metadata for a single prompt assembly (v0.8.4)."""
+    mode: str
+    estimated_tokens_total: int
+    max_memory_tokens: int = 0
+    sections_kept: List[str] = Field(default_factory=list)
+    sections_dropped: List[str] = Field(default_factory=list)
+    dropped_reason: Optional[str] = None
+    conflicts_count: int = 0
+    active_memory_count: int = 0
+    retrieved_count: int = 0
+    historical_count: int = 0
+    rejected_excluded_count: int = 0
+    section_tokens: Dict[str, int] = Field(default_factory=dict)
+
+
+class PromptAuditRequest(BaseModel):
+    """Request body for the prompt audit endpoint."""
+    messages: List[ChatMessage]
+    project_id: str = "default"
+    conversation_id: Optional[str] = None
+    include_historical: bool = False
+    mode: str = "compact"
+    max_memory_tokens: Optional[int] = None
